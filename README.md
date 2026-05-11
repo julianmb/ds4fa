@@ -155,8 +155,6 @@ Performance numbers utilizing the ROCm backend on AMD APUs, measured with
 kernels, quantization formats, and engineering knowledge developed there. We 
 are deeply thankful to Georgi Gerganov and the GGML contributors.
 
-This software was developed with **strong assistance from GPT 5.5** and with 
-humans leading the ideas, testing, and debugging.
 
 ## License
 
