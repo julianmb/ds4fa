@@ -78,11 +78,11 @@ int ds4_hip_init(void) {
     if (hipInit(0) != hipSuccess) return 0;
     if (hipStreamCreate(&g_stream) != hipSuccess) return 0;
     
-    // Hardware Guard: Ensure Strix Halo 128GB limits are respected by default
+    // Hardware Guard: Ensure Strix Halo limits are respected
     size_t free_mem, total_mem;
     if (hipMemGetInfo(&free_mem, &total_mem) == hipSuccess) {
         if (total_mem <= (size_t)140 * 1024 * 1024 * 1024) { // <= ~130GB usually means 128GB APU
-            fprintf(stderr, "ds4_hip: 128GB Strix Halo APU detected. Defaulting to safe memory profiles.\n");
+            fprintf(stderr, "ds4_hip: 128GB Strix Halo APU detected. Defaulting to safe memory profiles (q2 support).\n");
             // Capping the memory pool aggressively
             hipMemPool_t mem_pool;
             if (hipDeviceGetDefaultMemPool(&mem_pool, 0) == hipSuccess) {
@@ -90,7 +90,8 @@ int ds4_hip_init(void) {
                 hipMemPoolSetAttribute(mem_pool, hipMemPoolAttrReleaseThreshold, &threshold);
             }
         } else {
-            // Larger APUs or discrete GPUs (e.g. 256GB configurations)
+            // Larger APUs or Pipeline Parallel configurations (e.g. 256GB configurations)
+            fprintf(stderr, "ds4_hip: Large memory system detected (>128GB). Enabling q4 support profiles.\n");
             hipMemPool_t mem_pool;
             if (hipDeviceGetDefaultMemPool(&mem_pool, 0) == hipSuccess) {
                 uint64_t threshold = (uint64_t)2 * 1024 * 1024 * 1024; // 2GB
