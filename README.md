@@ -1,6 +1,6 @@
-# ds4fa: DeepSeek V4 Flash Inference Engine
+# ds4fa: Running DeepSeek V4 Flash on AMD Strix Halo (ROCm / XDNA 2)
 
-`ds4fa` (ds4 for AMD) is a high-performance fork of Antirez's original [ds4](https://github.com/antirez/ds4) engine, adapted specifically for **AMD ROCm** and the **Strix Halo (Ryzen AI Max, gfx1151)** APU architecture. While it is highly tuned for Strix Halo, it should work on other modern AMD GPUs (like RDNA 3/CDNA 3) via ROCm, though this remains untested.
+`ds4fa` (ds4 for AMD) is a high-performance native inference engine dedicated to running the **DeepSeek V4 Flash 284B MoE** model locally on AMD's unified memory APUs. It is a highly optimized fork of Antirez's original [ds4](https://github.com/antirez/ds4) engine, adapted specifically for **AMD ROCm** and the **Strix Halo (Ryzen AI Max, gfx1151)** architecture. While strictly tuned for Strix Halo, it should work on other modern AMD GPUs (like RDNA 3/CDNA 3) via ROCm, though this remains untested.
 
 You can try the DeepSeek V4 Flash experience powered by this architecture online at [au.privchat.ai](https://au.privchat.ai).
 
@@ -15,13 +15,9 @@ You can try the DeepSeek V4 Flash experience powered by this architecture online
 
 ## Architecture & Backends
 
-### 1. Apple Silicon (Metal)
-The main path for macOS users. It exploits unified memory and Metal graph
-executors to achieve massive performance on MacBooks and Mac Studios.
-
-### 2. AMD Strix Halo (ROCm/HIP)
+### 1. AMD Strix Halo (ROCm/HIP)
 A specialized port for AMD's unified memory APU architecture (`gfx1151`). It
-achieves 100% feature parity with the Metal backend, fully eradicating all C-level 
+achieves 100% feature parity with the original Mac implementation, fully eradicating all C-level 
 stubs to map the entire DeepSeek generation logic to the GPU. It achieves near-native 
 performance on Linux by leveraging:
 *   **Zero-Copy APU Memory**: Direct mapping of host RAM to the iGPU via `hipHostMallocMapped`.
@@ -30,7 +26,7 @@ performance on Linux by leveraging:
 *   **HIP Graph Capture**: Elimination of CPU kernel dispatch overhead.
 *   **Stream Ordered Memory (ROCm 7.3 SOMA)**: Fully asynchronous `hipMallocAsync` workflow.
 
-### 3. NPU Hybrid Architecture (XDNA 2)
+### 2. NPU Hybrid Architecture (XDNA 2)
 A foundational framework for **Multi-Token Prediction (MTP)** speculative decoding using the Ryzen AI NPU. The engine is architected to offload DeepSeek's native sequential MTP draft modules to the XDNA 2 NPU via the XRT API.
 *   **Zero-Copy SVA**: Uses Shared Virtual Addressing so the CPU, 40 CU iGPU, and XDNA 2 NPU all read/write the exact same token memory buffers without PCIe transfers.
 *   **Draft & Verify**: The NPU predicts multiple future tokens asynchronously, while the massive iGPU performs a single parallel batch verification to drastically increase tokens/second.
@@ -61,12 +57,6 @@ For developers looking to push the engine further:
 
 ## Requirements
 
-### macOS (Metal)
-*   **Hardware**: Apple Silicon (M1/M2/M3/M4 Max or Ultra).
-*   **Memory**: 128GB (for `q2` model) or 512GB (for `q4` model).
-*   **OS**: macOS 14.x or newer.
-
-### Linux (AMD ROCm)
 *   **Hardware**: AMD Ryzen AI Max Series (**Strix Halo**, `gfx1151`).
 *   **Memory**: 64GB - 128GB of LPDDR5X.
 *   **ROCm**: **ROCm 7.1+** (7.2.2/7.3 preferred).
@@ -77,7 +67,7 @@ For developers looking to push the engine further:
 
 ## Quickstart Guide
 
-This guide covers the AMD Strix Halo (ROCm) path on Ubuntu 24.04+. If you are using macOS, simply use `make` instead of `make BACKEND=rocm`.
+This guide covers the AMD Strix Halo (ROCm) path on Ubuntu 24.04+.
 
 ### 1. Install Dependencies
 Ensure you have the ROCm toolkit installed. 
