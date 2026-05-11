@@ -97,7 +97,7 @@ void ds4_npu_unregister_buffer(ds4_npu_context *ctx, void *host_ptr) {
 #endif
 }
 
-int ds4_npu_draft_mtp(ds4_npu_context *ctx, const int *input_tokens, int num_input, int *output_tokens, int max_draft) {
+int ds4_npu_draft_mtp_async(ds4_npu_context *ctx, const int *input_tokens, int num_input, int *output_tokens, int max_draft, int buffer_idx) {
     if (!ctx || !input_tokens || !output_tokens) return -1;
 #if !DS4_HAS_XRT
     return -1;
@@ -105,7 +105,9 @@ int ds4_npu_draft_mtp(ds4_npu_context *ctx, const int *input_tokens, int num_inp
     try {
         std::lock_guard<std::mutex> lock(ctx->mtx);
         
-        // 1. Resolve BOs for input/output
+        // 1. Resolve BOs for input/output using the ring buffer index offset
+        // In a real implementation, the host pointers passed here represent the specific
+        // slot in the ring buffer. SVA means the NPU uses these directly.
         auto it_in = ctx->bo_cache.find((void*)input_tokens);
         auto it_out = ctx->bo_cache.find((void*)output_tokens);
         
@@ -116,26 +118,19 @@ int ds4_npu_draft_mtp(ds4_npu_context *ctx, const int *input_tokens, int num_inp
         xrt::bo &bo_in = it_in->second;
         xrt::bo &bo_out = it_out->second;
 
-        // 2. Sync to ensure NPU sees latest CPU/iGPU writes
+        // 2. Sync to ensure NPU sees latest CPU/iGPU writes for this specific buffer slot
         bo_in.sync(XCL_BO_SYNC_BO_TO_DEVICE);
 
-        // 3. Launch the MTP draft module asynchronously
-        // In a typical NPU kernel, we pass input buffer, output buffer, 
-        // and current context length.
-        auto run = ctx->mtp_kernel(bo_in, bo_out, num_input, max_draft);
+        // 3. Launch the MTP draft module asynchronously on the NPU
+        auto run = ctx->mtp_kernel(bo_in, bo_out, num_input, max_draft, buffer_idx);
         
-        // 4. Wait for NPU to complete its predictions
-        run.wait();
-
-        // 5. Sync back so CPU/iGPU can read drafted tokens
-        bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
-
-        // We assume the kernel writes the number of tokens successfully 
-        // drafted into the first word of the output or returns it.
-        // For this implementation, we'll return max_draft for now.
+        // 4. Return immediately! DO NOT block the iGPU thread waiting for the NPU.
+        // The host code will sync the bo_out buffer later when it's ready to verify.
+        // run.wait(); -> Removed for async ring-buffering.
+        
         return max_draft;
     } catch (const std::exception& e) {
-        fprintf(stderr, "ds4_npu: Draft execution failed: %s\n", e.what());
+        fprintf(stderr, "ds4_npu: Async draft execution failed: %s\n", e.what());
         return -1;
     }
 #endif
