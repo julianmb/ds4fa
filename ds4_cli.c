@@ -1,4 +1,5 @@
 #include "ds4.h"
+#include "ds4_npu.h"
 #include "linenoise.h"
 
 /* ds4 CLI.
@@ -40,6 +41,7 @@ typedef struct {
     bool metal_graph_test;
     bool metal_graph_full_test;
     bool metal_graph_prompt_test;
+    bool npu_status_test;
 } cli_generation_options;
 
 typedef struct {
@@ -97,6 +99,8 @@ static void usage(FILE *fp) {
         "      CPU helper threads for host-side or reference work.\n"
         "  --quality\n"
         "      Prefer exact kernels where faster approximate paths exist; MTP uses strict verification.\n"
+        "  --npu-xclbin FILE\n"
+        "      Optional path to a compiled AMD XDNA 2 NPU binary (.xclbin) for MTP drafting.\n"
         "  --warm-weights\n"
         "      Touch mapped tensor pages before generation. Slower startup, fewer first-use stalls.\n"
         "\n"
@@ -145,6 +149,8 @@ static void usage(FILE *fp) {
         "      Write greedy continuation top-logprobs as JSON without printing text.\n"
         "  --logprobs-top-k N\n"
         "      Number of local alternatives stored by --dump-logprobs. Default: 20\n"
+        "  --npu-test\n"
+        "      Probe the AMD XDNA NPU driver and print device information.\n"
         "  --head-test\n"
         "      Run the output HC/logits head after the native slice.\n"
         "  --first-token-test\n"
@@ -1211,6 +1217,9 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.seed = parse_u64(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--quality")) {
             c.engine.quality = true;
+        } else if (!strcmp(arg, "--npu-xclbin")) {
+            c.engine.npu_xclbin = need_arg(&i, argc, argv, arg);
+            c.engine.use_npu = true;
         } else if (!strcmp(arg, "-t") || !strcmp(arg, "--threads")) {
             c.engine.n_threads = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--backend")) {
@@ -1233,6 +1242,8 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.think_mode = DS4_THINK_NONE;
         } else if (!strcmp(arg, "--head-test")) {
             c.gen.head_test = true;
+        } else if (!strcmp(arg, "--npu-test")) {
+            c.gen.npu_status_test = true;
         } else if (!strcmp(arg, "--first-token-test")) {
             c.gen.first_token_test = true;
         } else if (!strcmp(arg, "--metal-graph-test")) {
@@ -1277,6 +1288,9 @@ int main(int argc, char **argv) {
                                             stdout);
         free(cfg.prompt_owned);
         return rc;
+    }
+    if (cfg.gen.npu_status_test) {
+        return ds4_npu_status_check() ? 0 : 1;
     }
     if (!cfg.inspect) {
         log_context_memory(cfg.engine.backend, cfg.gen.ctx_size);

@@ -37,7 +37,8 @@
 #include "ds4.h"
 
 #ifndef DS4_NO_METAL
-#include "ds4_metal.h"
+#include "ds4_gpu.h"
+#include "ds4_npu.h"
 #endif
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -13544,6 +13545,8 @@ struct ds4_engine {
     bool quality;
     bool metal_ready;
     bool mtp_ready;
+    bool npu_ready;
+    struct ds4_npu_context *npu_ctx;
 };
 
 static void utf8_put(char **p, uint32_t cp) {
@@ -15778,6 +15781,14 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
     }
 #endif
 
+    if (opt->use_npu) {
+        e->npu_ready = ds4_npu_init(&e->npu_ctx, opt->npu_xclbin);
+        if (e->npu_ready) {
+            fprintf(stderr, "ds4: XDNA 2 NPU backend initialized (xclbin=%s)\n",
+                    opt->npu_xclbin ? opt->npu_xclbin : "none");
+        }
+    }
+
     *out = e;
     return 0;
 }
@@ -15794,6 +15805,7 @@ void ds4_engine_close(ds4_engine *e) {
     if (e->mtp_ready) model_close(&e->mtp_model);
     model_close(&e->model);
 #ifndef DS4_NO_METAL
+    if (e->npu_ready) ds4_npu_cleanup(e->npu_ctx);
     ds4_metal_cleanup();
 #endif
     ds4_release_instance_lock();

@@ -63,6 +63,8 @@ typedef struct {
     float mtp_margin;
     bool warm_weights;
     bool quality;
+    const char *npu_xclbin;
+    bool use_npu;
 } ds4_engine_options;
 
 typedef void (*ds4_token_emit_fn)(void *ud, int token);
