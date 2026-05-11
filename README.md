@@ -48,6 +48,7 @@ default when using the ROCm backend:
 Strix Halo's 128GB memory ceiling restricts it natively to the `q2` quant (80GB). For developers looking to push the engine further to run the `q4` models (160GB), we have added foundational **Network Pipeline Parallelism** via the `ds4_rpc` module.
 
 Because USB4 (40Gbps) and 10GbE networking have high latency compared to local PCIe, standard Tensor Parallelism (AllReduce per-layer) is non-viable. Instead, `ds4fa` utilizes **Layer Sharding (Pipeline Parallelism)**:
+*   **HMM Memory Fallback**: `ds4fa` intelligently detects if a mapped model exceeds the node's physical memory. If so, it skips hardware pinning (`hipHostRegister`) and relies on ROCm's Heterogeneous Memory Management (HMM). This allows two 128GB nodes to memory-map the 160GB file without crashing, naturally page-faulting only their assigned layers into physical RAM.
 *   **Master Node**: Maps the first 30 layers (`--rpc-role master`). Executes the forward pass, performs a `hipMemcpyDtoHAsync` of the intermediate activation state, and transmits it via a raw TCP socket (`ds4_rpc_tx`).
 *   **Worker Node**: Maps the final 31 layers (`--rpc-role worker`). Receives the activation, executes the remaining network graph, and returns the logits to the Master.
 
