@@ -5,7 +5,7 @@
  *
  * HTTP is intentionally simple: each client connection is handled by a small
  * blocking thread that parses one request, then queues a job to the single
- * Metal worker.  The worker owns the ds4_session and therefore owns all live KV
+ * rocm worker.  The worker owns the ds4_session and therefore owns all live KV
  * cache state.  That keeps session reuse, disk checkpointing, and future
  * batching decisions in one place instead of spreading graph mutations across
  * client threads. */
@@ -4505,7 +4505,7 @@ static void apply_openai_stream_tool_ids(tool_calls *calls,
  * Disk KV Cache.
  * =========================================================================
  *
- * The server has one live Metal session.  We persist reusable DS4 session
+ * The server has one live rocm session.  We persist reusable DS4 session
  * snapshots when a cold prompt reaches a useful prefix, when a long continued
  * conversation has grown far enough, and when a request evicts the live session.
  * The cache key is the SHA1 of the token IDs, not text: chat templates, JSON
@@ -4546,7 +4546,7 @@ static void apply_openai_stream_tool_ids(tool_calls *calls,
 #define KV_CACHE_DEFAULT_COLD_MAX_TOKENS 30000
 /* Tokenizers may merge text across the prompt boundary.  Trimming a small tail
  * makes the persisted prefix more likely to remain a token prefix after more
- * user text is appended.  The 2048 alignment also matches the Metal prefill
+ * user text is appended.  The 2048 alignment also matches the rocm prefill
  * chunk schedule, which keeps compressor row finalization identical to a cold
  * full prompt. */
 #define KV_CACHE_DEFAULT_BOUNDARY_TRIM_TOKENS 32
@@ -6096,7 +6096,7 @@ static void generate_job(server *s, job *j) {
     char *disk_cache_path = NULL;
     if (cached == 0) s->kv.continued_last_store_tokens = 0;
     if (s->kv.enabled && cached == 0 && old_pos >= s->kv.opt.min_tokens) {
-        /* Loading a disk snapshot replaces the live Metal session.  Persist the
+        /* Loading a disk snapshot replaces the live rocm session.  Persist the
          * current checkpoint first, otherwise a cache hit for an older prefix
          * would silently discard the newer conversation state. */
         kv_cache_store_current(s, "evict");
@@ -7062,7 +7062,7 @@ static void usage(FILE *fp) {
         "  ./ds4-server --ctx 100000 --kv-disk-dir /tmp/ds4-kv --kv-disk-space-mb 8192\n"
         "\n"
         "Notes:\n"
-        "  The server is Metal-only. Use /v1/chat/completions, /v1/completions, or /v1/messages.\n"
+        "  The server is rocm-only. Use /v1/chat/completions, /v1/completions, or /v1/messages.\n"
         "  Larger --ctx values allocate more KV memory at startup; the startup log prints the estimate.\n"
         "  Disk KV caching is best for agents that resend long prompts with stable prefixes.\n"
         "\n"
@@ -7074,7 +7074,7 @@ static server_config parse_options(int argc, char **argv) {
     server_config c = {
         .engine = {
             .model_path = "ds4flash.gguf",
-            .backend = DS4_BACKEND_METAL,
+            .backend = DS4_BACKEND_ROCM,
             .mtp_draft_tokens = 1,
             .mtp_margin = 3.0f,
         },
@@ -7136,7 +7136,7 @@ static server_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--warm-weights")) {
             c.engine.warm_weights = true;
         } else if (!strcmp(arg, "--cpu") || !strcmp(arg, "--backend")) {
-            server_log(DS4_LOG_DEFAULT, "ds4-server: server mode is Metal-only");
+            server_log(DS4_LOG_DEFAULT, "ds4-server: server mode is rocm-only");
             exit(2);
         } else {
             server_log(DS4_LOG_DEFAULT, "ds4-server: unknown option: %s", arg);
@@ -7173,7 +7173,7 @@ int main(int argc, char **argv) {
 
     ds4_session *session = NULL;
     if (ds4_session_create(&session, engine, cfg.ctx_size) != 0) {
-        server_log(DS4_LOG_DEFAULT, "ds4-server: failed to create Metal session");
+        server_log(DS4_LOG_DEFAULT, "ds4-server: failed to create rocm session");
         ds4_engine_close(engine);
         return 1;
     }

@@ -148,14 +148,14 @@ Point agents to `http://127.0.0.1:8000/v1` (API key: `dsv4-local`).
 
 ## Speed
 
-Metal CLI numbers with `--ctx 32768`, `--nothink`, greedy decoding, and `-n 256`:
+Performance numbers utilizing the ROCm backend on AMD APUs, measured with 
+`--ctx 32768`, `--nothink`, greedy decoding, and `-n 256`:
 
 | Machine | Quant | Prompt | Prefill | Generation |
 | --- | ---: | ---: | ---: | ---: |
-| MacBook Pro M3 Max, 128 GB | q2 | short | 58.52 t/s | 26.68 t/s |
-| Mac Studio M3 Ultra, 512 GB | q2 | 11k tok | 468.03 t/s | 27.39 t/s |
+| Dinference's ClawRig 128GB | q2 | short | 433.32 t/s | 29.23 t/s |
 
-*AMD ROCm benchmarks pending community verification.*
+*Note: The `q4` quantization numbers are coming soon. Testing requires a 256GB unified memory system.*
 
 ---
 
