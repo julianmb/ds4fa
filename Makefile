@@ -9,7 +9,7 @@ HIP_OBJS = hip/argsort.o hip/bin.o hip/concat.o hip/cpy.o hip/dense.o \
            hip/dsv4_hc.o hip/dsv4_kv.o hip/dsv4_misc.o hip/dsv4_rope.o \
            hip/flash_attn.o hip/get_rows.o hip/glu.o hip/moe.o hip/norm.o \
            hip/repeat.o hip/set_rows.o hip/softmax.o hip/sum_rows.o hip/unary.o \
-           ds4_npu.o
+           ds4_npu.o ds4_rpc.o
 
 CORE_OBJS = ds4.o ds4_hip.o $(HIP_OBJS)
 CFLAGS += -DDS4_USE_ROCM
@@ -47,6 +47,9 @@ ds4_hip.o: ds4_hip.cpp ds4_hip.h
 
 ds4_npu.o: ds4_npu.cpp ds4_npu.h
 	$(HIPCC) $(HIP_CFLAGS) -c -o $@ ds4_npu.cpp
+
+ds4_rpc.o: ds4_rpc.c ds4_rpc.h
+	$(CC) $(CFLAGS) -c -o $@ ds4_rpc.c
 
 hip/%.o: hip/%.hip
 	$(HIPCC) $(HIP_CFLAGS) -c -o $@ $<

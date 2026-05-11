@@ -65,6 +65,9 @@ typedef struct {
     bool quality;
     const char *npu_xclbin;
     bool use_npu;
+    int rpc_role; // 0=None, 1=Master, 2=Worker
+    const char *rpc_ip;
+    int rpc_port;
 } ds4_engine_options;
 
 typedef void (*ds4_token_emit_fn)(void *ud, int token);

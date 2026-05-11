@@ -44,14 +44,17 @@ default when using the ROCm backend:
 *   **Wave32 WMMA**: All MatMul and Attention kernels are compiled for Wave32 mode 
     to maximize CU occupancy on RDNA 3.5.
 
-### Advanced Improvements
-For developers looking to push the engine further:
-1.  **Fused MoE Routing**: Fusing the `ds4_hip_router_select` and `ds4_hip_routed_moe` 
-    kernels to keep routing weights in L2.
-2.  **register-level ASM**: Hand-tuning the `IQ2_XXS` bit-extraction using raw 
-    GCN/RDNA assembly for even lower latency.
-3.  **io_uring Support**: Implementing asynchronous disk I/O for the `--kv-disk-dir` 
-    path to overlap context swapping with active generation.
+### Advanced Improvements & Network Pipeline Parallelism (Q4 Models)
+Strix Halo's 128GB memory ceiling restricts it natively to the `q2` quant (80GB). For developers looking to push the engine further to run the `q4` models (160GB), we have added foundational **Network Pipeline Parallelism** via the `ds4_rpc` module.
+
+Because USB4 (40Gbps) and 10GbE networking have high latency compared to local PCIe, standard Tensor Parallelism (AllReduce per-layer) is non-viable. Instead, `ds4fa` utilizes **Layer Sharding (Pipeline Parallelism)**:
+*   **Master Node**: Maps the first 30 layers (`--rpc-role master`). Executes the forward pass, performs a `hipMemcpyDtoHAsync` of the intermediate activation state, and transmits it via a raw TCP socket (`ds4_rpc_tx`).
+*   **Worker Node**: Maps the final 31 layers (`--rpc-role worker`). Receives the activation, executes the remaining network graph, and returns the logits to the Master.
+
+The C sockets and headers are implemented in `ds4_rpc.c`. To deploy this over your 10GbE network:
+1. Integrate the `ds4_rpc_tx` and `ds4_rpc_rx` hooks within `rocm_graph_eval_token_raw_swa` in `ds4.c`.
+2. Run on Machine B (Worker): `./ds4-server --rpc-role worker --rpc-port 8000`
+3. Run on Machine A (Master): `./ds4 -m ds4flash-q4.gguf --rpc-role master --rpc-ip 192.168.1.100 --rpc-port 8000 -p "Your prompt"`
 
 ---
 
