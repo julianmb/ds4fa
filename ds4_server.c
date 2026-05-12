@@ -282,9 +282,16 @@ static bool json_bool(const char **p, bool *out) {
     return false;
 }
 
-static bool json_skip_value(const char **p);
+/* The request parser only understands the API fields we use and skips the
+ * rest. Skipping is recursive because JSON values nest, so keep an explicit
+ * ceiling: without it, a useless ignored field like {"x":[[[...]]]} can spend
+ * the whole C stack before the request is rejected. */
+#define JSON_MAX_NESTING 256
 
-static bool json_skip_array(const char **p) {
+static bool json_skip_value_depth(const char **p, int depth);
+
+static bool json_skip_array_depth(const char **p, int depth) {
+    if (depth >= JSON_MAX_NESTING) return false;
     json_ws(p);
     if (**p != '[') return false;
     (*p)++;
@@ -294,7 +301,7 @@ static bool json_skip_array(const char **p) {
         return true;
     }
     for (;;) {
-        if (!json_skip_value(p)) return false;
+        if (!json_skip_value_depth(p, depth + 1)) return false;
         json_ws(p);
         if (**p == ']') {
             (*p)++;
@@ -305,7 +312,8 @@ static bool json_skip_array(const char **p) {
     }
 }
 
-static bool json_skip_object(const char **p) {
+static bool json_skip_object_depth(const char **p, int depth) {
+    if (depth >= JSON_MAX_NESTING) return false;
     json_ws(p);
     if (**p != '{') return false;
     (*p)++;
@@ -321,7 +329,7 @@ static bool json_skip_object(const char **p) {
         json_ws(p);
         if (**p != ':') return false;
         (*p)++;
-        if (!json_skip_value(p)) return false;
+        if (!json_skip_value_depth(p, depth + 1)) return false;
         json_ws(p);
         if (**p == '}') {
             (*p)++;
@@ -332,7 +340,7 @@ static bool json_skip_object(const char **p) {
     }
 }
 
-static bool json_skip_value(const char **p) {
+static bool json_skip_value_depth(const char **p, int depth) {
     json_ws(p);
     if (**p == '"') {
         char *s = NULL;
@@ -340,11 +348,15 @@ static bool json_skip_value(const char **p) {
         free(s);
         return ok;
     }
-    if (**p == '{') return json_skip_object(p);
-    if (**p == '[') return json_skip_array(p);
+    if (**p == '{') return json_skip_object_depth(p, depth);
+    if (**p == '[') return json_skip_array_depth(p, depth);
     if (json_lit(p, "true") || json_lit(p, "false") || json_lit(p, "null")) return true;
     double v = 0.0;
     return json_number(p, &v);
+}
+
+static bool json_skip_value(const char **p) {
+    return json_skip_value_depth(p, 0);
 }
 
 static bool json_raw_value(const char **p, char **out) {
@@ -8478,6 +8490,27 @@ static void test_stop_list_streaming_holds_and_trims_stop_text(void) {
     free(stops.v);
 }
 
+static char *test_nested_json_array(int depth) {
+    buf b = {0};
+    for (int i = 0; i < depth; i++) buf_putc(&b, '[');
+    buf_putc(&b, '0');
+    for (int i = 0; i < depth; i++) buf_putc(&b, ']');
+    return buf_take(&b);
+}
+
+static void test_json_skip_has_nesting_limit(void) {
+    char *ok = test_nested_json_array(JSON_MAX_NESTING);
+    const char *p = ok;
+    TEST_ASSERT(json_skip_value(&p));
+    TEST_ASSERT(*p == '\0');
+    free(ok);
+
+    char *bad = test_nested_json_array(JSON_MAX_NESTING + 1);
+    p = bad;
+    TEST_ASSERT(!json_skip_value(&p));
+    free(bad);
+}
+
 static void test_model_metadata_clamps_completion_to_context(void) {
     buf b = {0};
     append_model_json_values(&b, 32768, 393216);
@@ -8850,6 +8883,7 @@ static void ds4_server_unit_tests_run(void) {
     test_dsml_prompt_escapes_tool_supplied_text();
     test_stop_list_parses_all_sequences();
     test_stop_list_streaming_holds_and_trims_stop_text();
+    test_json_skip_has_nesting_limit();
     test_model_metadata_clamps_completion_to_context();
     test_client_socket_nonblocking_flag();
     test_thinking_state_tracks_prompt_and_generated_tags();
