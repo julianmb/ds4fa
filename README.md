@@ -15,15 +15,17 @@ You can try the DeepSeek V4 Flash experience powered by this architecture online
 
 ## Architecture & Backends
 
-### 1. AMD Strix Halo (ROCm/HIP)
+### 1. AMD ROCm / HIP Backend
 A specialized port for AMD's unified memory APU architecture (`gfx1151`). It
-achieves 100% feature parity with the original Mac implementation, fully eradicating all C-level 
-stubs to map the entire DeepSeek generation logic to the GPU. It achieves near-native 
-performance on Linux by leveraging:
+targets feature parity with the original implementation, but this fork should
+still be treated as a work in progress. The current priority is making the ROCm
+path honest and debuggable before re-enabling more aggressive graph-level
+optimizations. It leverages:
 *   **Zero-Copy APU Memory**: Direct mapping of host RAM to the iGPU via `hipHostMallocMapped`.
 *   **Hardware Matrix Cores (WMMA)**: MatMul acceleration using RDNA 3.5 AI accelerators.
 *   **Single-Cycle 2-bit Decoding**: Bitfield extraction intrinsics (`ubfe`) for `IQ2_XXS` weights.
-*   **HIP Graph Capture**: Elimination of CPU kernel dispatch overhead.
+*   **Plain HIP Stream Submission**: The previous graph-capture shim has been disabled because it captured temporary host buffers unsafely. HIP graphs should only be reintroduced with explicit graph-safe parameter updates.
+*   **Strict Memory & Execution Bounds**: Bounds-checked tensor views, synchronous host I/O where required, and fail-fast diagnostics for incomplete cache paths.
 *   **Stream Ordered Memory (ROCm 7.3 SOMA)**: Fully asynchronous `hipMallocAsync` workflow.
 
 ### 2. NPU Hybrid Architecture (XDNA 2)
@@ -88,8 +90,11 @@ Clone the repository and compile the engine using the ROCm backend:
 git clone https://github.com/yourusername/ds4fa.git
 cd ds4fa
 
-# Build the binaries (ds4 and ds4-server)
-make BACKEND=rocm
+# Build the binaries for Strix Halo (default gfx1151)
+make
+
+# Or build for another AMD architecture (e.g. RX 7900 XTX / gfx1100)
+make GPU_ARCH=gfx1100
 ```
 
 ### 3. Verify Hardware
@@ -137,6 +142,20 @@ Start a local server with **SSD-backed KV Cache** to handle 1M token contexts wi
 ./ds4-server --ctx 100000 --kv-disk-dir /tmp/ds4-kv --kv-disk-space-mb 8192
 ```
 Point agents to `http://127.0.0.1:8000/v1` (API key: `dsv4-local`).
+
+## Testing
+
+The default ROCm fork test target currently runs the local server/parser/cache
+unit tests without requiring the model weights:
+
+```bash
+make test
+```
+
+Full ROCm inference validation still requires the DeepSeek V4 Flash GGUF and
+the prompt/logprob vector tests to be ported from the old Metal-specific test
+path. Known incomplete ROCm host-layer paths now fail fast with a diagnostic
+instead of silently returning incorrect cache state.
 
 ---
 
