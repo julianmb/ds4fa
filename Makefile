@@ -1,9 +1,10 @@
 CC ?= cc
-CFLAGS ?= -O3 -ffast-math -mcpu=native -Wall -Wextra -std=gnu99
+CFLAGS ?= -O3 -ffast-math -march=native -Wall -Wextra -std=gnu99
 
 LDLIBS ?= -lm -pthread
 HIPCC ?= hipcc
-HIP_CFLAGS = -O3 -std=c++11 -DDS4_USE_ROCM --offload-arch=gfx1151
+GPU_ARCH ?= gfx1151
+HIP_CFLAGS ?= -O3 -std=c++11 -DDS4_USE_ROCM --offload-arch=$(GPU_ARCH)
 HIP_LDLIBS = $(LDLIBS)
 HIP_OBJS = hip/argsort.o hip/bin.o hip/concat.o hip/cpy.o hip/dense.o \
            hip/dsv4_hc.o hip/dsv4_kv.o hip/dsv4_misc.o hip/dsv4_rope.o \
@@ -13,6 +14,7 @@ HIP_OBJS = hip/argsort.o hip/bin.o hip/concat.o hip/cpy.o hip/dense.o \
 
 CORE_OBJS = ds4.o ds4_hip.o $(HIP_OBJS)
 CFLAGS += -DDS4_USE_ROCM
+TEST_CFLAGS = $(CFLAGS) -DDS4_NO_METAL
 
 .PHONY: all clean test
 
@@ -34,7 +36,7 @@ ds4_server.o: ds4_server.c ds4.h rax.h
 	$(CC) $(CFLAGS) -c -o $@ ds4_server.c
 
 ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h rax.h
-	$(CC) $(CFLAGS) -Wno-unused-function -c -o $@ tests/ds4_test.c
+	$(CC) $(TEST_CFLAGS) -Wno-unused-function -c -o $@ tests/ds4_test.c
 
 rax.o: rax.c rax.h rax_malloc.h
 	$(CC) $(CFLAGS) -c -o $@ rax.c

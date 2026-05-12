@@ -23,20 +23,21 @@
 - [x] `sum_rows.hip`
 - [x] `unary.hip`
 
-## 3. Implement HIP Graphs for CPU Overhead Reduction (Done)
-- [x] Record the entire forward pass (MoE routing, small MLPs) into an executable graph.
-- [x] Replay the graph per-token to eliminate CPU launch overhead and bottlenecking.
+## 3. Implement HIP Graphs for CPU Overhead Reduction (Open)
+- [ ] Reintroduce HIP graph capture with graph-safe parameter updates.
+- [ ] Avoid captured memcpy nodes from stack or short-lived host buffers.
+- [ ] Add a ROCm graph replay regression test before enabling this path by default.
 
 ## 4. Host-to-Device Wiring (`ds4_hip.cpp`) (Done)
 - [x] APU Zero-copy unified memory (`hipHostMallocMapped`).
 - [x] Map all 19 HIP kernels to host C wrappers.
 - [x] ROCm 7.x Stream Ordered Memory Allocator (SOMA).
 
-## 5. C-Engine Integration (`ds4.c`) (Done)
-- [x] Eradicate all C-level execution stubs.
-- [x] Hook ROCm kernels natively into the engine flow.
+## 5. C-Engine Integration (`ds4.c`) (In Progress)
+- [ ] Remove or implement the remaining ROCm host-layer stubs in `ds4_hip.cpp`.
+- [x] Hook the main ROCm kernels into the engine flow.
 
-## 6. NPU (XDNA 2) Speculative Decoding (Done)
-- [x] Integrate XRT (Xilinx Runtime) to initialize the XDNA 2 NPU.
-- [x] Implement the DeepSeek **Multi-Token Prediction (MTP)** modules to run on the NPU.
-- [x] Implement the speculative decoding handoff logic: NPU generates MTP token guesses into zero-copy buffers, iGPU verifies in parallel.
+## 6. NPU (XDNA 2) Speculative Decoding (Experimental)
+- [x] Add optional XRT initialization scaffolding.
+- [ ] Provide a real DeepSeek MTP XDNA graph/xclbin contract.
+- [ ] Add an end-to-end NPU draft/verify test.

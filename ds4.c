@@ -4,7 +4,7 @@
  *
  * This file is deliberately vertical: it owns GGUF loading, the fixed
  * DeepSeek V4 Flash tensor layout, CPU reference kernels, the whole-model
- * rocm graph driver, and tokenizer wiring.  The model shape is not
+ * rocm runtime driver, and tokenizer wiring.  The model shape is not
  * configurable here; every validation step is meant to fail early if a GGUF
  * does not match the one layout this engine implements.
  *
@@ -14554,7 +14554,7 @@ static int generate_rocm_graph_raw_swa(
         void              * emit_ud,
         ds4_session_progress_fn progress,
         void              * progress_ud) {
-    fprintf(stderr, "ds4: using rocm graph generation with layer-major graph prefill\n");
+    fprintf(stderr, "ds4: using ROCm/HIP generation with layer-major prefill\n");
 
     if (prompt->len <= 0 || prompt->len > ctx_size) {
         fprintf(stderr, "ds4: prompt is empty or exceeds context size\n");
@@ -15780,7 +15780,7 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
             *out = NULL;
             return 1;
         }
-        fprintf(stderr, "ds4: rocm backend initialized for graph diagnostics\n");
+        fprintf(stderr, "ds4: ROCm/HIP backend initialized\n");
     }
 #else
     if (e->backend == DS4_BACKEND_ROCM) {

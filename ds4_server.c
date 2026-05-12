@@ -2505,7 +2505,7 @@ static bool send_all(int fd, const void *p, size_t n) {
     long long deadline = wall_ms() + DS4_SERVER_SEND_STALL_TIMEOUT_MS;
     while (n) {
         if (g_stop_requested) return false;
-        ssize_t w = send(fd, s, n, 0);
+        ssize_t w = write(fd, s, n);
         if (w < 0 && errno == EINTR) continue;
         if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             long long remaining = deadline - wall_ms();
@@ -7360,6 +7360,12 @@ static char *read_socket_text(int fd) {
     return buf_take(&b);
 }
 
+static char *finish_socketpair_text(int sv[2]) {
+    close(sv[0]);
+    sv[0] = -1;
+    return read_socket_text(sv[1]);
+}
+
 static void test_anthropic_live_stream_sends_incremental_blocks(void) {
     int sv[2];
     TEST_ASSERT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
@@ -7389,8 +7395,7 @@ static void test_anthropic_live_stream_sends_incremental_blocks(void) {
     TEST_ASSERT(anthropic_sse_finish_live(sv[0], &r, "msg_test", &st,
                                           raw, strlen(raw), &calls,
                                           "tool_calls", 8));
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     const char *msg_start = strstr(out, "event: message_start");
     const char *thinking = strstr(out, "\"thinking\":\"need a tool\"");
@@ -7449,8 +7454,7 @@ static void test_openai_tool_stream_sends_incremental_text(void) {
     TEST_ASSERT(openai_sse_finish_live(sv[0], NULL, &r, "chatcmpl_test", &st,
                                        raw, strlen(raw), &calls,
                                        "tool_calls", 10, 8));
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     const char *role = strstr(out, "\"role\":\"assistant\"");
     const char *thinking = strstr(out, "\"reasoning_content\":\"need a tool\"");
@@ -7503,8 +7507,7 @@ static void test_openai_chat_stream_splits_reasoning_without_tools(void) {
     TEST_ASSERT(openai_sse_finish_live(sv[0], NULL, &r, "chatcmpl_title", &st,
                                        raw2, strlen(raw2), NULL,
                                        "stop", 12, 8));
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     const char *role = strstr(out, "\"role\":\"assistant\"");
     const char *reasoning1 = strstr(out, "\"reasoning_content\":\"We need to generate \"");
@@ -7577,8 +7580,7 @@ static void test_openai_tool_stream_sends_partial_arguments(void) {
                                        raw_complete, strlen(raw_complete), &calls,
                                        "tool_calls", 10, 4));
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     const char *text = strstr(out, "\"content\":\"Before.\"");
     const char *tool = strstr(out, "\"tool_calls\"");
@@ -7639,8 +7641,7 @@ static void test_openai_tool_stream_waits_for_incomplete_tool_tags(void) {
     TEST_ASSERT(st.mode == OPENAI_STREAM_TOOL);
     TEST_ASSERT(st.tool.state == OPENAI_TOOL_BETWEEN_PARAMS);
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
     TEST_ASSERT(strstr(out, "\"name\":\"bash\"") != NULL);
     TEST_ASSERT(strstr(out, DS4_PARAM_START) == NULL);
 
@@ -7672,8 +7673,7 @@ static void test_openai_tool_stream_sends_partial_raw_arguments(void) {
     TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_raw_tool", &st,
                                          raw, strlen(raw), false));
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     TEST_ASSERT(strstr(out, "\"name\":\"edit\"") != NULL);
     TEST_ASSERT(strstr(out, "\\\"edits\\\":") != NULL);
@@ -7717,8 +7717,7 @@ static void test_openai_tool_stream_holds_partial_dsml_entities(void) {
     TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_entity_tool", &st,
                                          raw_complete, strlen(raw_complete), false));
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     TEST_ASSERT(strstr(out, "\"arguments\":\"echo \"") != NULL);
     TEST_ASSERT(strstr(out, "\"arguments\":\"& done\"") != NULL);
@@ -7770,8 +7769,7 @@ static void test_openai_tool_stream_holds_partial_utf8_arguments(void) {
     TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_utf8_tool", &st,
                                          complete.ptr, complete.len, false));
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     TEST_ASSERT(strstr(out, "\"arguments\":\"flag \"") != NULL);
     TEST_ASSERT(strstr(out, flag_utf8) != NULL);
@@ -7812,8 +7810,7 @@ static void test_openai_tool_stream_handles_multiple_calls(void) {
     TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_multi_tool", &st,
                                          raw, strlen(raw), false));
 
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     int tool_id_count = 0;
     for (const char *p = out; (p = strstr(p, "\"id\":\"call_")) != NULL; p++) tool_id_count++;
@@ -7857,8 +7854,7 @@ static void test_streaming_holds_partial_utf8(void) {
                                          partial, strlen(partial), false));
     TEST_ASSERT(openai_sse_stream_update(sv[0], NULL, &r, "chatcmpl_utf8", &st,
                                          complete, strlen(complete), false));
-    shutdown(sv[0], SHUT_WR);
-    char *out = read_socket_text(sv[1]);
+    char *out = finish_socketpair_text(sv);
 
     TEST_ASSERT(strstr(out, "\"content\":\"A \"") != NULL);
     TEST_ASSERT(strstr(out, flag_done) != NULL);

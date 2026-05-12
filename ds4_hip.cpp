@@ -15,6 +15,8 @@ struct ds4_hip_tensor {
 
 static hipStream_t g_stream;
 static int g_initialized = 0;
+static bool g_quality = false;
+static uint64_t g_tensor_bytes = 0;
 
 // Kernel declarations
 extern "C" __global__ void kernel_rms_norm_fuse_impl(struct ds4_hip_args_norm args, const char * src0, const char * src1_0, const char * src1_1, char * dst, int F);
@@ -71,6 +73,15 @@ static int ds4_hip_ensure_scratch_buffer(void **buffer, uint64_t *capacity, uint
     *capacity = bytes; return 1;
 }
 
+static bool ds4_hip_range_ok(uint64_t total, uint64_t offset, uint64_t bytes) {
+    return offset <= total && bytes <= total - offset;
+}
+
+static int ds4_hip_unimplemented(const char *name) {
+    fprintf(stderr, "ds4_hip: %s is not implemented in the ROCm backend yet\n", name);
+    return 0;
+}
+
 extern "C" {
 
 int ds4_hip_init(void) {
@@ -116,86 +127,109 @@ void ds4_hip_cleanup(void) {
 
 ds4_hip_tensor *ds4_hip_tensor_alloc(uint64_t bytes) {
     ds4_hip_tensor *t = (ds4_hip_tensor *)malloc(sizeof(ds4_hip_tensor));
+    if (!t) return NULL;
     t->bytes = bytes; t->offset = 0; t->is_view = false;
-    if (hipHostMalloc(&t->ptr, bytes, hipHostMallocMapped) != hipSuccess) { free(t); return NULL; }
+    if (hipHostMalloc(&t->ptr, bytes ? bytes : 1, hipHostMallocMapped) != hipSuccess) {
+        free(t);
+        return NULL;
+    }
+    g_tensor_bytes += bytes;
     return t;
 }
 
 ds4_hip_tensor *ds4_hip_tensor_view(const ds4_hip_tensor *base, uint64_t offset, uint64_t bytes) {
+    if (!base || !ds4_hip_range_ok(base->bytes, offset, bytes)) return NULL;
     ds4_hip_tensor *t = (ds4_hip_tensor *)malloc(sizeof(ds4_hip_tensor));
+    if (!t) return NULL;
     t->ptr = (char *)base->ptr + offset; t->bytes = bytes; t->offset = base->offset + offset; t->is_view = true;
     return t;
 }
 
 void ds4_hip_tensor_free(ds4_hip_tensor *tensor) {
     if (!tensor) return;
-    if (!tensor->is_view) hipHostFree(tensor->ptr);
+    if (!tensor->is_view) {
+        hipHostFree(tensor->ptr);
+        if (g_tensor_bytes >= tensor->bytes) g_tensor_bytes -= tensor->bytes;
+        else g_tensor_bytes = 0;
+    }
     free(tensor);
 }
 
 uint64_t ds4_hip_tensor_bytes(const ds4_hip_tensor *tensor) { return tensor->bytes; }
 void *ds4_hip_tensor_contents(ds4_hip_tensor *tensor) { return tensor->ptr; }
-int ds4_hip_tensor_write(ds4_hip_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) { return hipMemcpyHtoDAsync((char *)tensor->ptr + offset, data, bytes, g_stream) == hipSuccess; }
-int ds4_hip_tensor_read(const ds4_hip_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) { return hipMemcpyDtoHAsync(data, (char *)tensor->ptr + offset, bytes, g_stream) == hipSuccess; }
-int ds4_hip_tensor_copy(ds4_hip_tensor *dst, uint64_t dst_offset, const ds4_hip_tensor *src, uint64_t src_offset, uint64_t bytes) { return hipMemcpyDtoDAsync((char *)dst->ptr + dst_offset, (char *)src->ptr + src_offset, bytes, g_stream) == hipSuccess; }
-static hipGraph_t g_graph;
-static hipGraphExec_t g_graph_exec;
-static bool g_capturing = false;
+int ds4_hip_tensor_write(ds4_hip_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
+    if (!tensor || (!data && bytes != 0) || !ds4_hip_range_ok(tensor->bytes, offset, bytes)) return 0;
+    if (bytes == 0) return 1;
+    if (hipMemcpyAsync((char *)tensor->ptr + offset, data, bytes, hipMemcpyDefault, g_stream) != hipSuccess) return 0;
+    return hipStreamSynchronize(g_stream) == hipSuccess;
+}
+int ds4_hip_tensor_read(const ds4_hip_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) {
+    if (!tensor || (!data && bytes != 0) || !ds4_hip_range_ok(tensor->bytes, offset, bytes)) return 0;
+    if (bytes == 0) return 1;
+    if (hipMemcpyAsync(data, (const char *)tensor->ptr + offset, bytes, hipMemcpyDefault, g_stream) != hipSuccess) return 0;
+    return hipStreamSynchronize(g_stream) == hipSuccess;
+}
+int ds4_hip_tensor_copy(ds4_hip_tensor *dst, uint64_t dst_offset, const ds4_hip_tensor *src, uint64_t src_offset, uint64_t bytes) {
+    if (!dst || !src ||
+        !ds4_hip_range_ok(dst->bytes, dst_offset, bytes) ||
+        !ds4_hip_range_ok(src->bytes, src_offset, bytes)) return 0;
+    if (bytes == 0) return 1;
+    return hipMemcpyAsync((char *)dst->ptr + dst_offset,
+                          (const char *)src->ptr + src_offset,
+                          bytes, hipMemcpyDefault, g_stream) == hipSuccess;
+}
 
+/* Keep command submission as a plain HIP stream for now. The previous graph
+ * capture path recorded memcpy nodes from stack/temporary host buffers, which
+ * is not safe to replay. */
 int ds4_hip_begin_commands(void) {
-    if (g_capturing) return 0;
-    hipError_t err = hipStreamBeginCapture(g_stream, hipStreamCaptureModeGlobal);
-    if (err == hipSuccess) g_capturing = true;
-    return err == hipSuccess;
+    return g_initialized || ds4_hip_init();
 }
 
 int ds4_hip_flush_commands(void) {
-    if (!g_capturing) return 1;
-    hipError_t err = hipStreamEndCapture(g_stream, &g_graph);
-    if (err != hipSuccess) return 0;
-    err = hipGraphInstantiate(&g_graph_exec, g_graph, NULL, NULL, 0);
-    g_capturing = false;
-    return err == hipSuccess;
+    return hipGetLastError() == hipSuccess;
 }
 
 int ds4_hip_end_commands(void) {
-    if (g_graph_exec) {
-        hipError_t err = hipGraphLaunch(g_graph_exec, g_stream);
-        return err == hipSuccess;
-    }
-    return 1;
+    return hipStreamSynchronize(g_stream) == hipSuccess;
 }
 int ds4_hip_synchronize(void) { return hipStreamSynchronize(g_stream) == hipSuccess; }
 
 
 int ds4_hip_set_model_map(const void *model_map, uint64_t model_size) {
-    return 1;
+    return ds4_hip_set_model_map_range(model_map, model_size, 0, model_size);
 }
 
 int ds4_hip_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size) {
-    (void)model_size;
+    if (!model_map || map_offset > model_size || map_size > model_size - map_offset) return 0;
     
     // Sniff memory to see if we can safely pin and pre-warm this block
     size_t free_mem, total_mem;
     bool can_pin = false;
     if (hipMemGetInfo(&free_mem, &total_mem) == hipSuccess) {
         // Leave a 4GB buffer for OS and scratch
-        if (map_size < (free_mem - (4ULL * 1024 * 1024 * 1024))) {
+        const uint64_t reserve = 4ULL * 1024 * 1024 * 1024;
+        if ((uint64_t)free_mem > reserve && map_size < (uint64_t)free_mem - reserve) {
             can_pin = true;
         }
     }
 
     if (can_pin) {
-        void *target_ptr = (void *)((const char *)model_map + map_offset);
-        if (hipHostRegister(target_ptr, map_size, hipHostRegisterDefault) == hipSuccess) {
+        const uintptr_t page = 4096;
+        uintptr_t start = (uintptr_t)((const char *)model_map + map_offset);
+        uintptr_t reg_start = start & ~(page - 1);
+        uint64_t reg_extra = (uint64_t)(start - reg_start);
+        uint64_t reg_size = (map_size + reg_extra + page - 1) & ~(uint64_t)(page - 1);
+        void *target_ptr = (void *)reg_start;
+        if (hipHostRegister(target_ptr, reg_size, hipHostRegisterDefault) == hipSuccess) {
             // Hint: Read-mostly optimized for Strix Halo iGPU L2 / System Cache
-            hipMemAdvise(target_ptr, map_size, hipMemAdviseSetReadMostly, 0);
+            hipMemAdvise(target_ptr, reg_size, hipMemAdviseSetReadMostly, 0);
             
             // GPU Pre-warming: Touch each page to force HW address translation and cache warm-up
-            uint64_t num_pages = (map_size + 4095) / 4096;
+            uint64_t num_pages = (reg_size + 4095) / 4096;
             dim3 block(256);
             dim3 grid((num_pages + 255) / 256);
-            kernel_prewarm<<<grid, block, 0, g_stream>>>((const char *)target_ptr, map_size);
+            kernel_prewarm<<<grid, block, 0, g_stream>>>((const char *)target_ptr, reg_size);
             hipStreamSynchronize(g_stream);
             fprintf(stderr, "ds4_hip: Model mapped, pinned, and pre-warmed successfully.\n");
         } else {
@@ -207,8 +241,19 @@ int ds4_hip_set_model_map_range(const void *model_map, uint64_t model_size, uint
     
     return 1;
 }
-void ds4_hip_set_quality(bool quality) {}
-void ds4_hip_print_memory_report(const char *label) {}
+void ds4_hip_set_quality(bool quality) { g_quality = quality; }
+void ds4_hip_print_memory_report(const char *label) {
+    size_t free_mem = 0, total_mem = 0;
+    if (hipMemGetInfo(&free_mem, &total_mem) != hipSuccess) return;
+    fprintf(stderr,
+            "ds4_hip: memory%s%s total=%.2f GiB free=%.2f GiB tensors=%.2f GiB quality=%s\n",
+            label ? " " : "",
+            label ? label : "",
+            (double)total_mem / (1024.0 * 1024.0 * 1024.0),
+            (double)free_mem / (1024.0 * 1024.0 * 1024.0),
+            (double)g_tensor_bytes / (1024.0 * 1024.0 * 1024.0),
+            g_quality ? "true" : "false");
+}
 
 int ds4_hip_rms_norm_plain_tensor(ds4_hip_tensor *out, const ds4_hip_tensor *x, uint32_t n, float eps) {
     struct ds4_hip_args_norm args = {0}; args.ne00 = n; args.ne00_t = n / 4; args.nb1 = n * sizeof(float); args.eps = eps; args.nbf1[0] = n * sizeof(float);
@@ -249,10 +294,12 @@ int ds4_hip_head_rms_norm_tensor(ds4_hip_tensor *x, uint32_t n_tok, uint32_t n_h
 int ds4_hip_embed_token_hc_tensor(ds4_hip_tensor *out_hc, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t token, uint32_t n_embd, uint32_t n_hc) {
     if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, n_embd * sizeof(float))) return 0;
     if (!ds4_hip_ensure_scratch_buffer(&g_token_buffer, &g_token_capacity, sizeof(int32_t))) return 0;
-    int32_t t = token; hipMemcpyAsync(g_token_buffer, &t, sizeof(int32_t), hipMemcpyHostToDevice, g_stream);
+    int32_t t = token;
+    if (hipMemcpyAsync(g_token_buffer, &t, sizeof(int32_t), hipMemcpyHostToDevice, g_stream) != hipSuccess) return 0;
+    if (hipStreamSynchronize(g_stream) != hipSuccess) return 0;
     struct ds4_hip_args_get_rows args = {0}; args.ne00 = n_embd; args.ne10 = 1; args.nb01 = n_embd * sizeof(uint16_t); args.nb1 = n_embd * sizeof(float);
     kernel_get_rows_f32<<<1, 256, 0, g_stream>>>(args, (const char *)model_map + weight_offset, (const char *)g_token_buffer, (char *)g_embed_rows_buffer);
-    for (uint32_t i = 0; i < n_hc; i++) hipMemcpyDtoHAsync((char *)out_hc->ptr + i * n_embd * sizeof(float), g_embed_rows_buffer, n_embd * sizeof(float), g_stream);
+    for (uint32_t i = 0; i < n_hc; i++) hipMemcpyAsync((char *)out_hc->ptr + i * n_embd * sizeof(float), g_embed_rows_buffer, n_embd * sizeof(float), hipMemcpyDefault, g_stream);
     return hipGetLastError() == hipSuccess;
 }
 
@@ -310,8 +357,10 @@ int ds4_hip_attention_output_q8_batch_tensor(ds4_hip_tensor *out, ds4_hip_tensor
     if (!ds4_hip_ensure_scratch_buffer(&g_attn_out_group_ids_buffer, &g_attn_out_group_ids_capacity, n_tokens * n_groups * sizeof(int32_t))) return 0;
     int32_t *ids_host = (int32_t *)malloc(n_tokens * n_groups * sizeof(int32_t));
     for (uint32_t t = 0; t < n_tokens; t++) for (uint32_t g = 0; g < n_groups; g++) ids_host[t * n_groups + g] = g;
-    hipMemcpyAsync(g_attn_out_group_ids_buffer, ids_host, n_tokens * n_groups * sizeof(int32_t), hipMemcpyHostToDevice, g_stream);
+    hipError_t copy_err = hipMemcpyAsync(g_attn_out_group_ids_buffer, ids_host, n_tokens * n_groups * sizeof(int32_t), hipMemcpyHostToDevice, g_stream);
+    if (copy_err == hipSuccess) copy_err = hipStreamSynchronize(g_stream);
     free(ids_host);
+    if (copy_err != hipSuccess) return 0;
     kernel_mul_mm_id_q8_0_f32<<<dim3((rank + 63)/64, (n_tokens + 31)/32, n_groups), dim3(16, 16), 16384, g_stream>>>(args, (const char *)model_map + out_a_offset, (const char *)heads->ptr, (char *)low->ptr, (const char *)g_attn_out_group_ids_buffer, (char *)low->ptr);
     return ds4_hip_matmul_q8_0_tensor(out, model_map, model_size, out_b_offset, rank, out_dim, low, n_tokens);
 }
@@ -409,7 +458,8 @@ int ds4_hip_attention_output_low_q8_tensor(ds4_hip_tensor *low, const void *mode
     args.nb01 = group_dim + (group_dim/32)*sizeof(float); args.nb11 = group_dim * sizeof(float);
     args.ne0 = rank; args.ne1 = 1;
     for (uint32_t g = 0; g < n_groups; g++) {
-        kernel_mul_mv_q8_0_f32<<<dim3((rank+1)/2, 1), 256, 256*sizeof(float), g_stream>>>(args, (const char *)model_map + out_a_offset + g*args.nb02, (const char *)heads->ptr + g*args.nb11, (char *)low->ptr + g*rank*sizeof(float));
+        const uint64_t group_bytes = args.nb01 * rank;
+        kernel_mul_mv_q8_0_f32<<<dim3((rank+1)/2, 1), 256, 256*sizeof(float), g_stream>>>(args, (const char *)model_map + out_a_offset + g*group_bytes, (const char *)heads->ptr + g*args.nb11, (char *)low->ptr + g*rank*sizeof(float));
     }
     return hipGetLastError() == hipSuccess;
 }
@@ -474,13 +524,14 @@ int ds4_hip_hc_expand_add_split_tensor(ds4_hip_tensor *out_hc, const ds4_hip_ten
     return hipGetLastError() == hipSuccess;
 }
 
-// Minimal stubs for remaining items to satisfy linker
+// Remaining host wrappers. Incomplete paths must fail instead of reporting
+// success with missing cache state.
 int ds4_hip_embed_tokens_hc_tensor(ds4_hip_tensor *out_hc, const ds4_hip_tensor *tokens, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t n_tokens, uint32_t n_embd, uint32_t n_hc) {
     if (!g_initialized && !ds4_hip_init()) return 0;
     if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, n_tokens * n_embd * sizeof(float))) return 0;
     struct ds4_hip_args_get_rows args = {0}; args.ne00 = n_embd; args.ne10 = n_tokens; args.nb01 = n_embd * sizeof(uint16_t); args.nb1 = n_embd * sizeof(float);
     kernel_get_rows_f32<<<dim3(n_tokens), 256, 0, g_stream>>>(args, (const char *)model_map + weight_offset, (const char *)tokens->ptr, (char *)g_embed_rows_buffer);
-    for (uint32_t i = 0; i < n_hc; i++) hipMemcpyDtoHAsync((char *)out_hc->ptr + i * n_embd * n_tokens * sizeof(float), g_embed_rows_buffer, n_embd * n_tokens * sizeof(float), g_stream);
+    for (uint32_t i = 0; i < n_hc; i++) hipMemcpyAsync((char *)out_hc->ptr + i * n_embd * n_tokens * sizeof(float), g_embed_rows_buffer, n_embd * n_tokens * sizeof(float), hipMemcpyDefault, g_stream);
     return hipGetLastError() == hipSuccess;
 }
 int ds4_hip_indexer_scores_decode_batch_tensor(ds4_hip_tensor *scores, const ds4_hip_tensor *q, const ds4_hip_tensor *weights, const ds4_hip_tensor *index_comp, uint32_t n_comp, uint32_t n_tokens, uint32_t pos0, uint32_t n_head, uint32_t head_dim, uint32_t ratio, float scale) {
@@ -536,36 +587,31 @@ int ds4_hip_kv_fp8_store_raw_tensor(ds4_hip_tensor *kv, ds4_hip_tensor *raw_cach
 int ds4_hip_store_raw_kv_tensor(ds4_hip_tensor *raw_cache, const ds4_hip_tensor *kv, uint32_t raw_cap, uint32_t row, uint32_t head_dim) {
     if (!g_initialized && !ds4_hip_init()) return 0;
     // Just a copy, but typically needs a kernel for strided write. We'll use a direct copy if it's 1 row.
-    hipMemcpyDtoDAsync((char *)raw_cache->ptr + row * head_dim * sizeof(uint16_t), kv->ptr, head_dim * sizeof(uint16_t), g_stream);
+    hipMemcpyAsync((char *)raw_cache->ptr + row * head_dim * sizeof(uint16_t), kv->ptr, head_dim * sizeof(uint16_t), hipMemcpyDefault, g_stream);
     return hipGetLastError() == hipSuccess;
 }
 int ds4_hip_store_raw_kv_batch_tensor(ds4_hip_tensor *raw_cache, const ds4_hip_tensor *kv, uint32_t raw_cap, uint32_t pos0, uint32_t n_tokens, uint32_t head_dim) {
     if (!g_initialized && !ds4_hip_init()) return 0;
     for (uint32_t i = 0; i < n_tokens; ++i) {
-        hipMemcpyDtoDAsync((char *)raw_cache->ptr + ((pos0 + i) % raw_cap) * head_dim * sizeof(uint16_t), (char *)kv->ptr + i * head_dim * sizeof(uint16_t), head_dim * sizeof(uint16_t), g_stream);
+        hipMemcpyAsync((char *)raw_cache->ptr + ((pos0 + i) % raw_cap) * head_dim * sizeof(uint16_t), (char *)kv->ptr + i * head_dim * sizeof(uint16_t), head_dim * sizeof(uint16_t), hipMemcpyDefault, g_stream);
     }
     return hipGetLastError() == hipSuccess;
 }
 int ds4_hip_compressor_store_batch_tensor(const ds4_hip_tensor *kv, const ds4_hip_tensor *sc, ds4_hip_tensor *state_kv, ds4_hip_tensor *state_score, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0, uint32_t n_tokens) {
-    if (!g_initialized && !ds4_hip_init()) return 0;
-    struct ds4_hip_args_dsv4_compressor_store_one args = {0}; args.width = head_dim; args.ratio = ratio; args.ape_type = ape_type;
-    for (uint32_t i = 0; i < n_tokens; ++i) {
-        args.pos = pos0 + i;
-        kernel_dsv4_compressor_store_one<<<1, 256, 0, g_stream>>>(args, (float *)state_kv->ptr, (float *)state_score->ptr, (const float *)((char *)kv->ptr + i * head_dim * sizeof(float)), (const float *)((char *)sc->ptr + i * sizeof(float)), ape_type ? (const char *)model_map + ape_offset : NULL, (float *)state_kv->ptr /* should be comp_cache, simplified */);
-    }
-    return hipGetLastError() == hipSuccess;
+    return ds4_hip_unimplemented("ds4_hip_compressor_store_batch_tensor");
 }
 int ds4_hip_compressor_prefill_ratio4_replay_tensor(ds4_hip_tensor *comp_cache, ds4_hip_tensor *state_kv, ds4_hip_tensor *state_score, const ds4_hip_tensor *kv, const ds4_hip_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps) {
-    // Requires specialized kernel_dsv4_compressor_prefill_ratio4_replay
-    return 1; // Mark success to bypass, rarely hit in simple chat
+    return ds4_hip_unimplemented("ds4_hip_compressor_prefill_ratio4_replay_tensor");
 }
 int ds4_hip_compressor_prefill_state_ratio4_tensor(ds4_hip_tensor *state_kv, ds4_hip_tensor *state_score, const ds4_hip_tensor *kv_tail, const ds4_hip_tensor *sc_tail, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint32_t head_dim, uint32_t pos0) {
-    return 1;
+    return ds4_hip_unimplemented("ds4_hip_compressor_prefill_state_ratio4_tensor");
 }
 int ds4_hip_attention_prefill_static_mixed_heads_tensor(ds4_hip_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_hip_tensor *q, const ds4_hip_tensor *raw_kv, const ds4_hip_tensor *comp_kv, uint32_t n_tokens, uint32_t n_comp, uint32_t window, uint32_t ratio, uint32_t n_head, uint32_t head_dim) {
+    if (n_comp != 0) return ds4_hip_unimplemented("ds4_hip_attention_prefill_static_mixed_heads_tensor with compressed cache");
     return ds4_hip_attention_prefill_raw_heads_tensor(heads, model_map, model_size, sinks_offset, q, raw_kv, n_tokens, window, n_head, head_dim);
 }
 int ds4_hip_attention_prefill_masked_mixed_heads_tensor(ds4_hip_tensor *heads, const void *model_map, uint64_t model_size, uint64_t sinks_offset, const ds4_hip_tensor *q, const ds4_hip_tensor *raw_kv, const ds4_hip_tensor *comp_kv, const ds4_hip_tensor *comp_mask, uint32_t n_tokens, uint32_t n_comp, uint32_t window, uint32_t ratio, uint32_t n_head, uint32_t head_dim) {
+    if (n_comp != 0) return ds4_hip_unimplemented("ds4_hip_attention_prefill_masked_mixed_heads_tensor with compressed cache");
     return ds4_hip_attention_prefill_raw_heads_tensor(heads, model_map, model_size, sinks_offset, q, raw_kv, n_tokens, window, n_head, head_dim);
 }
 int ds4_hip_router_select_batch_tensor(ds4_hip_tensor *selected, ds4_hip_tensor *weights, ds4_hip_tensor *probs, const void *model_map, uint64_t model_size, uint64_t bias_offset, uint64_t hash_offset, uint32_t hash_rows, uint32_t n_expert_groups, uint32_t n_group_used, bool has_bias, bool hash_mode, const ds4_hip_tensor *logits, const ds4_hip_tensor *tokens, uint32_t n_tokens) {
@@ -576,7 +622,9 @@ int ds4_hip_router_select_batch_tensor(ds4_hip_tensor *selected, ds4_hip_tensor 
         ds4_hip_tensor t_weights = *weights; t_weights.ptr = (char *)weights->ptr + i * n_group_used * sizeof(float);
         ds4_hip_tensor t_probs = *probs; t_probs.ptr = (char *)probs->ptr + i * n_expert_groups * sizeof(float);
         // Fallback to one-tensor routing (simplified)
-        ds4_hip_router_select_tensor(&t_selected, &t_weights, &t_probs, model_map, model_size, bias_offset, hash_offset, hash_rows, 0, n_expert_groups, n_group_used, has_bias, hash_mode, &t_logits);
+        uint32_t token = 0;
+        if (hash_mode && tokens) token = (uint32_t)((const int32_t *)tokens->ptr)[i];
+        ds4_hip_router_select_tensor(&t_selected, &t_weights, &t_probs, model_map, model_size, bias_offset, hash_offset, hash_rows, token, n_expert_groups, n_group_used, has_bias, hash_mode, &t_logits);
     }
     return hipGetLastError() == hipSuccess;
 }
@@ -591,9 +639,7 @@ int ds4_hip_matmul_f32_tensor(ds4_hip_tensor *out, const void *model_map, uint64
 }
 
 int ds4_hip_compressor_prefill_tensor(ds4_hip_tensor *comp_cache, ds4_hip_tensor *state_kv, ds4_hip_tensor *state_score, const ds4_hip_tensor *kv, const ds4_hip_tensor *sc, const void *model_map, uint64_t model_size, uint64_t ape_offset, uint32_t ape_type, uint64_t norm_offset, uint32_t norm_type, uint32_t head_dim, uint32_t ratio, uint32_t pos0, uint32_t n_tokens, uint32_t n_rot, uint32_t n_ctx_orig, bool quantize_fp8, float freq_base, float freq_scale, float ext_factor, float attn_factor, float beta_fast, float beta_slow, float rms_eps) {
-    struct ds4_hip_args_dsv4_fp8_kv_quantize args = {0}; args.ne00 = head_dim; args.ne01 = n_tokens; args.n_rot = n_rot;
-    kernel_dsv4_fp8_kv_quantize_f32<<< (n_tokens + 31)/32, 256, 256*sizeof(float), g_stream>>>(args, (const char *)kv->ptr, (char *)kv->ptr);
-    return hipGetLastError() == hipSuccess;
+    return ds4_hip_unimplemented("ds4_hip_compressor_prefill_tensor");
 }
 
 } // extern "C"

@@ -90,7 +90,7 @@ static void usage(FILE *fp) {
         "  -c, --ctx N\n"
         "      Context size allocated for the session. Default: 32768\n"
         "  --rocm\n"
-        "      Use the rocm graph backend. This is the normal fast path and the default.\n"
+        "      Use the ROCm/HIP backend. This is the normal fast path and the default.\n"
         "  --cpu\n"
         "      Use the CPU reference/debug backend. Not recommended for normal inference.\n"
         "  --backend NAME\n"
@@ -156,11 +156,11 @@ static void usage(FILE *fp) {
         "  --first-token-test\n"
         "      Run an exact CPU whole-model pass for the first prompt token.\n"
         "  --rocm-graph-test\n"
-        "      Compare first GPU-resident graph stages with CPU.\n"
+        "      Compare first GPU-resident ROCm stages with CPU.\n"
         "  --rocm-graph-full-test\n"
-        "      Run the GPU-resident self-token graph across all layers.\n"
+        "      Run the GPU-resident self-token ROCm path across all layers.\n"
         "  --rocm-graph-prompt-test\n"
-        "      Compare CPU and GPU graph logits for the full prompt.\n"
+        "      Compare CPU and GPU ROCm logits for the full prompt.\n"
         "\n"
         "Normal CLI commands:\n"
         "  ./ds4\n"
@@ -1256,7 +1256,7 @@ static cli_config parse_options(int argc, char **argv) {
             c.gen.rocm_graph_prompt_test = true;
             c.engine.backend = DS4_BACKEND_ROCM;
         } else if (!strcmp(arg, "--rocm-graph-generate")) {
-            fprintf(stderr, "ds4: --rocm-graph-generate was removed; --rocm is the graph path\n");
+            fprintf(stderr, "ds4: --rocm-graph-generate was removed; --rocm is the ROCm path\n");
             exit(2);
         } else if (!strcmp(arg, "--inspect")) {
             c.inspect = true;
