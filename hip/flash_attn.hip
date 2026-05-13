@@ -220,8 +220,8 @@ extern "C" __global__ void kernel_flash_attn_ext_blk(
         float mmin =  MAX_HALF;
         float mmax = -MAX_HALF;
 
-        FOR_UNROLL for (short j = 0; j < Q; ++j) {
-            FOR_UNROLL for (short ii = 0; ii < C/N_SIMDWIDTH; ++ii) {
+        for (short j = 0; j < Q; ++j) {
+            for (short ii = 0; ii < C/N_SIMDWIDTH; ++ii) {
                 float val = (float)mask_src[ii*N_SIMDWIDTH];
                 mmin = fminf(mmin, val);
                 mmax = fmaxf(mmax, val);
@@ -314,7 +314,7 @@ __device__ void kernel_flash_attn_ext_impl(
 
     const float2 * pm2[NQ];
 
-    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+    for (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
         pm2[jj] = (const float2 *) ((const char *) mask + (iq1 + j)*args.nb31 + (iq2%args.ne32)*args.nb32 + (iq3%args.ne33)*args.nb33);
     }
@@ -333,7 +333,7 @@ __device__ void kernel_flash_attn_ext_impl(
         v += ikv2*args.nb22 + ikv3*args.nb23;
     }
 
-    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+    for (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
         const float4 * q4_ptr = (const float4 *) ((const char *) q + j*args.nb01);
         for (short i = tiisg; i < DK4; i += NW) {
@@ -345,7 +345,7 @@ __device__ void kernel_flash_attn_ext_impl(
         }
     }
 
-    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+    for (short jj = 0; jj < NQ; ++jj) {
         const short j = jj*NSG + sgitg;
         for (short i = tiisg; i < PV4; i += NW) {
             so4[j*PV4 + i] = make_float4(0,0,0,0);
@@ -389,14 +389,14 @@ __device__ void kernel_flash_attn_ext_impl(
 
                 if (!args.has_mask) {
                     __half * sm = (__half *) (sm2);
-                    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+                    for (short jj = 0; jj < NQ; ++jj) {
                         const short j = jj*NSG + sgitg;
                         for (short i = tiisg; i < C; i += NW) {
                             if (ic + i >= args.ne11) sm[2*j*SH + i] = __float2half(-MAX_HALF);
                         }
                     }
                 } else {
-                    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+                    for (short jj = 0; jj < NQ; ++jj) {
                         const short j = jj*NSG + sgitg;
                         pm2[jj] = (const float2 *) ((const __half *) mask +
                                 (iq1 + j)*C +
@@ -411,11 +411,11 @@ __device__ void kernel_flash_attn_ext_impl(
             if (args.has_mask) {
                 blk_cur = blk[ic0];
                 if (blk_cur == 0) {
-                    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) pm2[jj] += NW;
+                    for (short jj = 0; jj < NQ; ++jj) pm2[jj] += NW;
                     continue;
                 }
                 if (blk_cur == 1) {
-                    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+                    for (short jj = 0; jj < NQ; ++jj) {
                         const short j = jj*NSG + sgitg;
                         if (args.bc_mask) {
                             sm2[j*SH + tiisg] = (iq1 + j) < args.ne31 ? pm2[jj][tiisg] : make_float2(-MAX_HALF, -MAX_HALF);
@@ -425,7 +425,7 @@ __device__ void kernel_flash_attn_ext_impl(
                         pm2[jj] += NW;
                     }
                 } else if (blk_cur == 2) {
-                    FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) pm2[jj] += NW;
+                    for (short jj = 0; jj < NQ; ++jj) pm2[jj] += NW;
                 }
             }
 
@@ -439,9 +439,9 @@ __device__ void kernel_flash_attn_ext_impl(
 
                 constexpr short NC = (C/8)/NSG;
 
-                FOR_UNROLL for (short cc = 0; cc < NC; ++cc) {
+                for (short cc = 0; cc < NC; ++cc) {
                     float mqk[2] = {0, 0};
-                    FOR_UNROLL for (short i = 0; i < DK8; ++i) {
+                    for (short i = 0; i < DK8; ++i) {
                         matmul8x8_block(mqk, pq_ptr + 8*i, DK, pk_ptr + 8*i, NS10, true);
                     }
                     const short t = tiisg;
@@ -468,7 +468,7 @@ __device__ void kernel_flash_attn_ext_impl(
                         }
                         __syncthreads();
 
-                        FOR_UNROLL for (short k_idx = 0; k_idx < 4 && ii + k_idx < DK16; ++k_idx) {
+                        for (short k_idx = 0; k_idx < 4 && ii + k_idx < DK16; ++k_idx) {
                             matmul8x8_block(mqk, sq + (2*(ii + k_idx))*8, DK, sk + 16*k_idx, 4*16, true);
                             matmul8x8_block(mqk, sq + (2*(ii + k_idx) + 1)*8, DK, sk + 16*k_idx + 8, 4*16, true);
                         }
@@ -482,7 +482,7 @@ __device__ void kernel_flash_attn_ext_impl(
 
             __syncthreads();
 
-            FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+            for (short jj = 0; jj < NQ; ++jj) {
                 const short j = jj*NSG + sgitg;
                 const float m = M[jj];
                 float2 s2 = ss2[j*SH/2 + tiisg];
@@ -525,7 +525,7 @@ __device__ void kernel_flash_attn_ext_impl(
                 const k_t * pv_ptr = (const k_t *) (v + ic*args.nb21);
                 pv_ptr += 8*sgitg;
 
-                FOR_UNROLL for (short cc = 0; cc < C/8; ++cc) {
+                for (short cc = 0; cc < C/8; ++cc) {
                     for (short ii = 0; ii < NO; ++ii) {
                         float mqk[2] = {0, 0};
                         matmul8x8_block(mqk, (const float *)(ss + 8*cc), SH, (const __half*)(pv_ptr + 16*ii*NSG), NS20, false);
@@ -542,7 +542,7 @@ __device__ void kernel_flash_attn_ext_impl(
         }
 
         if (args.has_sinks) {
-            FOR_UNROLL for (short jj = 0; jj < NQ; ++jj) {
+            for (short jj = 0; jj < NQ; ++jj) {
                 const short j = jj*NSG + sgitg;
                 const float m = M[jj];
                 const float s = tiisg == 0 ? ((const float *) sinks)[iq2] : -FLT_MAX/2;
@@ -730,9 +730,9 @@ __device__ void kernel_flash_attn_ext_vec_impl(
                 pk4 += ty*NS10/4 + tx;
 
                 float mqk[C/NE];
-                FOR_UNROLL for (short cc = 0; cc < C/NE; ++cc) {
+                for (short cc = 0; cc < C/NE; ++cc) {
                     mqk[cc] = 0.0f;
-                    FOR_UNROLL for (short ii = 0; ii < DK4/NL; ++ii) {
+                    for (short ii = 0; ii < DK4/NL; ++ii) {
                         mqk[cc] += dot_f4(pk4[cc*NE*NS10/4 + ii*NL], sq4[ii*NL + tx]); 
                     }
 
@@ -765,7 +765,7 @@ __device__ void kernel_flash_attn_ext_vec_impl(
                 ss[tiisg] = vs;
 
                 if ((DV4/NL % NW == 0) || ty == 0) {
-                    FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) {
+                    for (short ii = 0; ii < DV4/NL; ++ii) {
                         float4 val = so4[ii*NL];
                         val.x *= ms; val.y *= ms; val.z *= ms; val.w *= ms;
                         so4[ii*NL] = val;
@@ -777,14 +777,14 @@ __device__ void kernel_flash_attn_ext_vec_impl(
 
             {
                 float4 lo[DV4/NL];
-                FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) lo[ii] = make_float4(0,0,0,0);
+                for (short ii = 0; ii < DV4/NL; ++ii) lo[ii] = make_float4(0,0,0,0);
 
                 const float4 * pv4 = (const float4 *) (v + ic*args.nb21);
                 pv4 += ty*NS20/4 + tx;
                 const float * sst = ss + ty;
 
-                FOR_UNROLL for (short cc = 0; cc < C/NE; ++cc) {
-                    FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) {
+                for (short cc = 0; cc < C/NE; ++cc) {
+                    for (short ii = 0; ii < DV4/NL; ++ii) {
                         float4 v_val = pv4[cc*NE*NS20/4 + ii*NL];
                         float s_val = sst[cc*NE];
                         lo[ii].x += v_val.x * s_val;
@@ -794,7 +794,7 @@ __device__ void kernel_flash_attn_ext_vec_impl(
                     }
                 }
 
-                FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) {
+                for (short ii = 0; ii < DV4/NL; ++ii) {
                     if (NE > 1) {
                         for (int offset = NE / 2; offset > 0; offset /= 2) {
                             lo[ii].x += __shfl_down(lo[ii].x, offset, NW);
@@ -806,7 +806,7 @@ __device__ void kernel_flash_attn_ext_vec_impl(
                 }
 
                 if ((DV4/NL % NW == 0) || ty == 0) {
-                    FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) {
+                    for (short ii = 0; ii < DV4/NL; ++ii) {
                         float4 val = so4[ii*NL];
                         val.x += lo[ii].x; val.y += lo[ii].y; val.z += lo[ii].z; val.w += lo[ii].w;
                         so4[ii*NL] = val;
@@ -823,7 +823,7 @@ __device__ void kernel_flash_attn_ext_vec_impl(
             const float vs = expf(s - M);
             S = S*ms + warp_reduce_sum(vs);
             if ((DV4/NL % NW == 0) || ty == 0) {
-                FOR_UNROLL for (short ii = 0; ii < DV4/NL; ++ii) {
+                for (short ii = 0; ii < DV4/NL; ++ii) {
                     float4 val = so4[ii*NL];
                     val.x *= ms; val.y *= ms; val.z *= ms; val.w *= ms;
                     so4[ii*NL] = val;
