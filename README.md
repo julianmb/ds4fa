@@ -21,12 +21,12 @@ targets feature parity with the original implementation, but this fork should
 still be treated as a work in progress. The current priority is making the ROCm
 path honest and debuggable before re-enabling more aggressive graph-level
 optimizations. It leverages:
-*   **Zero-Copy APU Memory**: Direct mapping of host RAM to the iGPU via `hipHostMallocMapped`.
+*   **Zero-Copy APU Memory**: Direct mapping of host RAM to the iGPU via `hipHostMallocMapped` for transient tensors and validated `hipHostRegisterMapped` for model mmap ranges when HIP exposes an identical device pointer.
 *   **Hardware Matrix Cores (WMMA)**: MatMul acceleration using RDNA 3.5 AI accelerators.
 *   **Single-Cycle 2-bit Decoding**: Bitfield extraction intrinsics (`ubfe`) for `IQ2_XXS` weights.
 *   **Plain HIP Stream Submission**: The previous graph-capture shim has been disabled because it captured temporary host buffers unsafely. HIP graphs should only be reintroduced with explicit graph-safe parameter updates.
 *   **Strict Memory & Execution Bounds**: Bounds-checked tensor views, synchronous host I/O where required, and fail-fast diagnostics for incomplete cache paths.
-*   **Stream Ordered Memory (ROCm 7.3 SOMA)**: Fully asynchronous `hipMallocAsync` workflow.
+*   **Stream Ordered Memory (ROCm 7.2.x SOMA)**: Uses `hipMallocAsync` only when the runtime reports HIP memory-pool support, with an automatic `hipMalloc` fallback for unsupported or mismatched stacks.
 
 ### 2. NPU Hybrid Architecture (XDNA 2)
 A foundational framework for **Multi-Token Prediction (MTP)** speculative decoding using the Ryzen AI NPU. The engine is architected to offload DeepSeek's native sequential MTP draft modules to the XDNA 2 NPU via the XRT API.
@@ -38,19 +38,22 @@ A foundational framework for **Multi-Token Prediction (MTP)** speculative decodi
 The `ds4fa` engine includes several Strix Halo-specific optimizations enabled by 
 default when using the ROCm backend:
 
-*   **Memory Pre-warming**: On startup, the engine launches a dedicated GPU kernel to 
-    touch every page of the 80GB model map. This forces physical memory pinning 
-    and warms the Ryzen Infinity Fabric cache, eliminating first-token stutters.
+*   **Memory Pre-warming**: On startup, the engine launches a dedicated GPU kernel to
+    touch each safely registered model-map page. This warms address translation and
+    cache state without forcing oversized model ranges to be pinned.
 *   **Cache Hints**: Utilizes `hipMemAdviseSetReadMostly` to signal the Strix Halo 
     memory controller to prioritize model weights in the System Level Cache (SLC).
 *   **Wave32 WMMA**: All MatMul and Attention kernels are compiled for Wave32 mode 
     to maximize CU occupancy on RDNA 3.5.
+*   **RDNA3.5 Shared-Memory Checks**: At runtime the ROCm backend reports system RAM,
+    HIP-visible memory, and `/sys/module/ttm/parameters/pages_limit`, then warns when
+    a mapped model range is near the current TTM/GTT limit.
 
 ### Advanced Improvements & Network Pipeline Parallelism (Q4 Models)
 Strix Halo's 128GB memory ceiling restricts it natively to the `q2` quant (80GB). For developers looking to push the engine further to run the `q4` models (160GB), we have added foundational **Network Pipeline Parallelism** via the `ds4_rpc` module.
 
 Because USB4 (40Gbps) and 10GbE networking have high latency compared to local PCIe, standard Tensor Parallelism (AllReduce per-layer) is non-viable. Instead, `ds4fa` utilizes **Layer Sharding (Pipeline Parallelism)**:
-*   **HMM Memory Fallback**: `ds4fa` intelligently detects if a mapped model exceeds the node's physical memory. If so, it skips hardware pinning (`hipHostRegister`) and relies on ROCm's Heterogeneous Memory Management (HMM). This allows two 128GB nodes to memory-map the 160GB file without crashing, naturally page-faulting only their assigned layers into physical RAM.
+*   **HMM Memory Fallback**: `ds4fa` checks whether a mapped model range can be safely registered. If not, it skips `hipHostRegisterMapped` and relies on ROCm's Heterogeneous Memory Management (HMM). This lets two 128GB nodes memory-map a 160GB q4 file without trying to pin the whole file on each node.
 *   **Master Node**: Maps the first 30 layers (`--rpc-role master`). Executes the forward pass, performs a `hipMemcpyDtoHAsync` of the intermediate activation state, and transmits it via a raw TCP socket (`ds4_rpc_tx`).
 *   **Worker Node**: Maps the final 31 layers (`--rpc-role worker`). Receives the activation, executes the remaining network graph, and returns the logits to the Master.
 
@@ -65,8 +68,8 @@ The C sockets and headers are implemented in `ds4_rpc.c`. To deploy this over yo
 
 *   **Hardware**: AMD Ryzen AI Max Series (**Strix Halo**, `gfx1151`).
 *   **Memory**: 64GB - 128GB of LPDDR5X.
-*   **ROCm**: **ROCm 7.1+** (7.2.2/7.3 preferred).
-*   **Kernel**: Linux **6.18+** or **7.x** (7.1+ for NPU support).
+*   **ROCm**: **ROCm 7.2.3** is the current development baseline. The HIP runtime reports as HIP 7.2.x inside ROCm 7.2.3; ROCm 7.1+ is no longer the assumed target for Strix Halo.
+*   **Kernel**: For Ryzen AI Max (`gfx1151`), use a kernel with AMD's RDNA3.5 KFD fixes: Ubuntu 24.04 HWE `6.17.0-19.19~24.04.2+`, Ubuntu OEM `6.14.0-1018+`, or other distributions `6.18.4+`.
 *   **NPU Software**: Xilinx Runtime 2026.1+ (`xrt_coreutil`) for hybrid features.
 
 ---
@@ -83,6 +86,18 @@ sudo apt update
 sudo apt install build-essential git
 sudo apt install rocm-core rocm-hip-sdk  # Requires AMD repository setup
 ```
+
+The current known-good toolchain is ROCm 7.2.3. Confirm `hipcc --version`
+reports a 7.2.3 ROCm install before chasing backend issues. On Strix Halo, also
+check the shared GPU mapping limit:
+
+```bash
+cat /sys/module/ttm/parameters/pages_limit
+```
+
+AMD recommends keeping the BIOS VRAM reservation small and increasing the Linux
+TTM/GTT limit for large shared-memory workloads. The backend prints this limit at
+startup and warns when a model map is close to it.
 
 ### 2. Clone & Build
 Clone the repository and compile the engine using the ROCm backend:

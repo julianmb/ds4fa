@@ -1,10 +1,18 @@
 #include <hip/hip_runtime.h>
+#include <hip/hip_version.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
+#include <unistd.h>
 #include "ds4_hip.h"
 #include "ds4_gpu_common.h"
+
+#define DS4_HIP_ROCM72_MIN_VERSION (7 * 10000000 + 2 * 100000)
+#define DS4_HIP_ROCM723_BASELINE "ROCm 7.2.3 / HIP 7.2.x"
+#define DS4_HIP_MAX_REGISTERED_RANGES 8
+#define DS4_HIP_GIB (1024ULL * 1024ULL * 1024ULL)
 
 struct ds4_hip_tensor {
     void *ptr;
@@ -15,8 +23,25 @@ struct ds4_hip_tensor {
 
 static hipStream_t g_stream;
 static int g_initialized = 0;
+static int g_device = 0;
+static int g_runtime_version = 0;
+static int g_driver_version = 0;
+static char g_device_arch[256] = {0};
+static bool g_is_rdna35_apu = false;
+static bool g_is_strix_halo = false;
+static bool g_use_async_alloc = false;
+static bool g_warned_sync_alloc_fallback = false;
+static bool g_warned_rdna35_ttm_limit = false;
 static bool g_quality = false;
 static uint64_t g_tensor_bytes = 0;
+
+struct ds4_hip_registered_range {
+    void *ptr;
+    uint64_t bytes;
+};
+
+static ds4_hip_registered_range g_registered_ranges[DS4_HIP_MAX_REGISTERED_RANGES];
+static int g_registered_range_count = 0;
 
 // Kernel declarations
 extern "C" __global__ void kernel_rms_norm_fuse_impl(struct ds4_hip_args_norm args, const char * src0, const char * src1_0, const char * src1_1, char * dst, int F);
@@ -57,20 +82,103 @@ extern "C" __global__ void kernel_prewarm(const char * src, uint64_t size);
 
 // Scratch buffers
 static void *g_token_buffer = NULL; static uint64_t g_token_capacity = 0;
+static bool g_token_async_alloc = false;
 static void *g_embed_rows_buffer = NULL; static uint64_t g_embed_rows_capacity = 0;
+static bool g_embed_rows_async_alloc = false;
 static void *g_indexer_topk_buffer = NULL; static uint64_t g_indexer_topk_capacity = 0;
+static bool g_indexer_topk_async_alloc = false;
 static void *g_attn_out_group_ids_buffer = NULL; static uint64_t g_attn_out_group_ids_capacity = 0;
+static bool g_attn_out_group_ids_async_alloc = false;
 
-static int ds4_hip_ensure_scratch_buffer(void **buffer, uint64_t *capacity, uint64_t bytes) {
+static void ds4_hip_format_version(int version, char *buf, size_t len) {
+    if (!buf || len == 0) return;
+    if (version <= 0) {
+        snprintf(buf, len, "unknown");
+        return;
+    }
+    snprintf(buf, len, "%d.%d.%d",
+             version / 10000000,
+             (version / 100000) % 100,
+             version % 100000);
+}
+
+static uint64_t ds4_hip_total_system_memory_bytes(void) {
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || page_size <= 0) return 0;
+    if ((uint64_t)pages > UINT64_MAX / (uint64_t)page_size) return 0;
+    return (uint64_t)pages * (uint64_t)page_size;
+}
+
+static uint64_t ds4_hip_read_u64_file(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    unsigned long long value = 0;
+    int ok = fscanf(fp, "%llu", &value);
+    fclose(fp);
+    return ok == 1 ? (uint64_t)value : 0;
+}
+
+static uint64_t ds4_hip_ttm_limit_bytes(void) {
+    uint64_t pages = ds4_hip_read_u64_file("/sys/module/ttm/parameters/pages_limit");
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (pages == 0 || page_size <= 0) return 0;
+    if (pages > UINT64_MAX / (uint64_t)page_size) return UINT64_MAX;
+    return pages * (uint64_t)page_size;
+}
+
+static int ds4_hip_free_scratch_buffer(void **buffer, uint64_t *capacity, bool *async_alloc) {
+    if (!buffer || !capacity || !async_alloc) return 0;
+    if (!*buffer) {
+        *capacity = 0;
+        *async_alloc = false;
+        return 1;
+    }
+    hipError_t err = *async_alloc ? hipFreeAsync(*buffer, g_stream) : hipFree(*buffer);
+    if (err != hipSuccess) {
+        fprintf(stderr, "ds4_hip: failed to free scratch buffer: %s\n", hipGetErrorString(err));
+        return 0;
+    }
+    *buffer = NULL;
+    *capacity = 0;
+    *async_alloc = false;
+    return 1;
+}
+
+static int ds4_hip_ensure_scratch_buffer(void **buffer, uint64_t *capacity, bool *async_alloc, uint64_t bytes) {
     if (*capacity >= bytes) return 1;
-    if (*buffer) {
-        hipFreeAsync(*buffer, g_stream);
+    if (!ds4_hip_free_scratch_buffer(buffer, capacity, async_alloc)) return 0;
+    if (bytes == 0) bytes = 1;
+
+    if (g_use_async_alloc) {
+        hipError_t err = hipMallocAsync(buffer, bytes, g_stream);
+        if (err == hipSuccess) {
+            *capacity = bytes;
+            *async_alloc = true;
+            return 1;
+        }
+        if (err != hipErrorNotSupported && err != hipErrorInvalidValue) {
+            *capacity = 0;
+            *buffer = NULL;
+            return 0;
+        }
+        g_use_async_alloc = false;
+        if (!g_warned_sync_alloc_fallback) {
+            fprintf(stderr,
+                    "ds4_hip: hipMallocAsync unavailable at runtime (%s); falling back to hipMalloc scratch buffers.\n",
+                    hipGetErrorString(err));
+            g_warned_sync_alloc_fallback = true;
+        }
     }
-    // Leverage ROCm 7.x Stream Ordered Memory Allocator (SOMA)
-    if (hipMallocAsync(buffer, bytes, g_stream) != hipSuccess) { 
-        *capacity = 0; *buffer = NULL; return 0; 
+
+    if (hipMalloc(buffer, bytes) != hipSuccess) {
+        *capacity = 0;
+        *buffer = NULL;
+        return 0;
     }
-    *capacity = bytes; return 1;
+    *capacity = bytes;
+    *async_alloc = false;
+    return 1;
 }
 
 static bool ds4_hip_range_ok(uint64_t total, uint64_t offset, uint64_t bytes) {
@@ -82,34 +190,155 @@ static int ds4_hip_unimplemented(const char *name) {
     return 0;
 }
 
+static void ds4_hip_log_runtime(const hipDeviceProp_t *props, int memory_pools_supported) {
+    char build_ver[32], runtime_ver[32], driver_ver[32];
+    ds4_hip_format_version(HIP_VERSION, build_ver, sizeof(build_ver));
+    ds4_hip_format_version(g_runtime_version, runtime_ver, sizeof(runtime_ver));
+    ds4_hip_format_version(g_driver_version, driver_ver, sizeof(driver_ver));
+    fprintf(stderr,
+            "ds4_hip: HIP build=%s runtime=%s driver=%s baseline=%s\n",
+            build_ver, runtime_ver, driver_ver, DS4_HIP_ROCM723_BASELINE);
+    if (props) {
+        fprintf(stderr,
+                "ds4_hip: device=%s arch=%s managed=%s concurrent_managed=%s memory_pools=%s\n",
+                props->name,
+                props->gcnArchName[0] ? props->gcnArchName : "unknown",
+                props->managedMemory ? "yes" : "no",
+                props->concurrentManagedAccess ? "yes" : "no",
+                memory_pools_supported ? "yes" : "no");
+    }
+    if (g_runtime_version > 0 && g_runtime_version < DS4_HIP_ROCM72_MIN_VERSION) {
+        fprintf(stderr,
+                "ds4_hip: warning: HIP runtime is older than ROCm 7.2.x; this backend is tested against %s.\n",
+                DS4_HIP_ROCM723_BASELINE);
+    }
+}
+
+static void ds4_hip_log_rdna35_memory_profile(uint64_t hip_total_mem, uint64_t system_mem) {
+    if (!g_is_rdna35_apu) return;
+    uint64_t ttm_limit = ds4_hip_ttm_limit_bytes();
+    fprintf(stderr,
+            "ds4_hip: RDNA3.5 unified memory profile system=%.2f GiB hip_visible=%.2f GiB ttm_pages_limit=%.2f GiB\n",
+            (double)system_mem / (double)DS4_HIP_GIB,
+            (double)hip_total_mem / (double)DS4_HIP_GIB,
+            (double)ttm_limit / (double)DS4_HIP_GIB);
+    if (ttm_limit > 0 && system_mem > 0 && ttm_limit < system_mem / 2) {
+        fprintf(stderr,
+                "ds4_hip: warning: RDNA3.5 TTM/GTT limit is below half of system RAM; large model maps may underperform or fail.\n");
+    }
+}
+
+static void ds4_hip_warn_if_rdna35_ttm_too_small(uint64_t map_size) {
+    if (!g_is_rdna35_apu || g_warned_rdna35_ttm_limit) return;
+    uint64_t ttm_limit = ds4_hip_ttm_limit_bytes();
+    if (ttm_limit == 0) return;
+    if (map_size > ttm_limit || map_size > (ttm_limit * 9) / 10) {
+        fprintf(stderr,
+                "ds4_hip: warning: mapped model range %.2f GiB is near or above the RDNA3.5 TTM/GTT limit %.2f GiB. Increase /sys/module/ttm/parameters/pages_limit for Strix Halo large-model runs.\n",
+                (double)map_size / (double)DS4_HIP_GIB,
+                (double)ttm_limit / (double)DS4_HIP_GIB);
+        g_warned_rdna35_ttm_limit = true;
+    }
+}
+
+static void ds4_hip_configure_stream_allocator(size_t total_mem, int memory_pools_supported) {
+    g_use_async_alloc = false;
+    if (!memory_pools_supported) {
+        fprintf(stderr,
+                "ds4_hip: HIP memory pools are not reported by this device; scratch buffers will use hipMalloc.\n");
+        return;
+    }
+
+    hipMemPool_t mem_pool;
+    hipError_t err = hipDeviceGetDefaultMemPool(&mem_pool, g_device);
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "ds4_hip: hipDeviceGetDefaultMemPool failed (%s); scratch buffers will use hipMalloc.\n",
+                hipGetErrorString(err));
+        return;
+    }
+
+    uint64_t threshold = (uint64_t)1 * DS4_HIP_GIB;
+    if (total_mem > (size_t)140 * DS4_HIP_GIB) {
+        threshold = (uint64_t)2 * DS4_HIP_GIB;
+    }
+    err = hipMemPoolSetAttribute(mem_pool, hipMemPoolAttrReleaseThreshold, &threshold);
+    if (err != hipSuccess) {
+        fprintf(stderr,
+                "ds4_hip: hipMemPoolSetAttribute failed (%s); continuing with the default pool policy.\n",
+                hipGetErrorString(err));
+    }
+    g_use_async_alloc = true;
+    fprintf(stderr,
+            "ds4_hip: stream-ordered scratch allocator enabled, release_threshold=%.1f GiB\n",
+            (double)threshold / (1024.0 * 1024.0 * 1024.0));
+}
+
+static void ds4_hip_unregister_model_ranges(void) {
+    for (int i = 0; i < g_registered_range_count; i++) {
+        if (g_registered_ranges[i].ptr) {
+            hipHostUnregister(g_registered_ranges[i].ptr);
+            g_registered_ranges[i].ptr = NULL;
+            g_registered_ranges[i].bytes = 0;
+        }
+    }
+    g_registered_range_count = 0;
+}
+
+static int ds4_hip_remember_registered_range(void *ptr, uint64_t bytes) {
+    if (g_registered_range_count >= DS4_HIP_MAX_REGISTERED_RANGES) {
+        fprintf(stderr,
+                "ds4_hip: registered model range limit reached; keeping range mapped without tracking cleanup.\n");
+        return 0;
+    }
+    g_registered_ranges[g_registered_range_count].ptr = ptr;
+    g_registered_ranges[g_registered_range_count].bytes = bytes;
+    g_registered_range_count++;
+    return 1;
+}
+
 extern "C" {
 
 int ds4_hip_init(void) {
     if (g_initialized) return 1;
     if (hipInit(0) != hipSuccess) return 0;
+    if (hipSetDevice(g_device) != hipSuccess) return 0;
+    hipRuntimeGetVersion(&g_runtime_version);
+    hipDriverGetVersion(&g_driver_version);
+
+    hipDeviceProp_t props;
+    memset(&props, 0, sizeof(props));
+    hipDeviceProp_t *props_ptr = NULL;
+    if (hipGetDeviceProperties(&props, g_device) == hipSuccess) {
+        props_ptr = &props;
+        snprintf(g_device_arch, sizeof(g_device_arch), "%s", props.gcnArchName);
+        g_is_rdna35_apu = strncmp(g_device_arch, "gfx115", 6) == 0;
+        g_is_strix_halo = strcmp(g_device_arch, "gfx1151") == 0;
+    }
+
+    int memory_pools_supported = 0;
+    hipDeviceGetAttribute(&memory_pools_supported, hipDeviceAttributeMemoryPoolsSupported, g_device);
+    ds4_hip_log_runtime(props_ptr, memory_pools_supported);
+
     if (hipStreamCreate(&g_stream) != hipSuccess) return 0;
     
     // Hardware Guard: Ensure Strix Halo limits are respected
-    size_t free_mem, total_mem;
+    size_t free_mem = 0, total_mem = 0;
+    uint64_t system_mem = ds4_hip_total_system_memory_bytes();
+    uint64_t profile_mem = system_mem;
     if (hipMemGetInfo(&free_mem, &total_mem) == hipSuccess) {
-        if (total_mem <= (size_t)140 * 1024 * 1024 * 1024) { // <= ~130GB usually means 128GB APU
-            fprintf(stderr, "ds4_hip: 128GB Strix Halo APU detected. Defaulting to safe memory profiles (q2 support).\n");
-            // Capping the memory pool aggressively
-            hipMemPool_t mem_pool;
-            if (hipDeviceGetDefaultMemPool(&mem_pool, 0) == hipSuccess) {
-                uint64_t threshold = (uint64_t)1 * 1024 * 1024 * 1024; // Restrict to 1GB to prevent OS starvation
-                hipMemPoolSetAttribute(mem_pool, hipMemPoolAttrReleaseThreshold, &threshold);
-            }
+        if (profile_mem == 0) profile_mem = (uint64_t)total_mem;
+        ds4_hip_log_rdna35_memory_profile((uint64_t)total_mem, system_mem);
+        if (profile_mem <= (uint64_t)140 * DS4_HIP_GIB) {
+            fprintf(stderr,
+                    "ds4_hip: %s128GB-class memory profile detected. Defaulting to safe memory profiles (q2 support).\n",
+                    g_is_strix_halo ? "Strix Halo " : "");
         } else {
             // Larger APUs or Pipeline Parallel configurations (e.g. 256GB configurations)
             fprintf(stderr, "ds4_hip: Large memory system detected (>128GB). Enabling q4 support profiles.\n");
-            hipMemPool_t mem_pool;
-            if (hipDeviceGetDefaultMemPool(&mem_pool, 0) == hipSuccess) {
-                uint64_t threshold = (uint64_t)2 * 1024 * 1024 * 1024; // 2GB
-                hipMemPoolSetAttribute(mem_pool, hipMemPoolAttrReleaseThreshold, &threshold);
-            }
         }
     }
+    ds4_hip_configure_stream_allocator((size_t)profile_mem, memory_pools_supported);
     
     g_initialized = 1; return 1;
 }
@@ -117,11 +346,14 @@ int ds4_hip_init(void) {
 void ds4_hip_cleanup(void) {
     if (!g_initialized) return;
     hipStreamSynchronize(g_stream);
-    if (g_token_buffer) hipFree(g_token_buffer);
-    if (g_embed_rows_buffer) hipFree(g_embed_rows_buffer);
-    if (g_indexer_topk_buffer) hipFree(g_indexer_topk_buffer);
-    if (g_attn_out_group_ids_buffer) hipFree(g_attn_out_group_ids_buffer);
+    ds4_hip_free_scratch_buffer(&g_token_buffer, &g_token_capacity, &g_token_async_alloc);
+    ds4_hip_free_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, &g_embed_rows_async_alloc);
+    ds4_hip_free_scratch_buffer(&g_indexer_topk_buffer, &g_indexer_topk_capacity, &g_indexer_topk_async_alloc);
+    ds4_hip_free_scratch_buffer(&g_attn_out_group_ids_buffer, &g_attn_out_group_ids_capacity, &g_attn_out_group_ids_async_alloc);
+    hipStreamSynchronize(g_stream);
+    ds4_hip_unregister_model_ranges();
     hipStreamDestroy(g_stream);
+    g_use_async_alloc = false;
     g_initialized = 0;
 }
 
@@ -202,6 +434,7 @@ int ds4_hip_set_model_map(const void *model_map, uint64_t model_size) {
 
 int ds4_hip_set_model_map_range(const void *model_map, uint64_t model_size, uint64_t map_offset, uint64_t map_size) {
     if (!model_map || map_offset > model_size || map_size > model_size - map_offset) return 0;
+    ds4_hip_warn_if_rdna35_ttm_too_small(map_size);
     
     // Sniff memory to see if we can safely pin and pre-warm this block
     size_t free_mem, total_mem;
@@ -221,7 +454,16 @@ int ds4_hip_set_model_map_range(const void *model_map, uint64_t model_size, uint
         uint64_t reg_extra = (uint64_t)(start - reg_start);
         uint64_t reg_size = (map_size + reg_extra + page - 1) & ~(uint64_t)(page - 1);
         void *target_ptr = (void *)reg_start;
-        if (hipHostRegister(target_ptr, reg_size, hipHostRegisterDefault) == hipSuccess) {
+        if (hipHostRegister(target_ptr, reg_size, hipHostRegisterMapped) == hipSuccess) {
+            void *device_ptr = NULL;
+            hipError_t ptr_err = hipHostGetDevicePointer(&device_ptr, target_ptr, 0);
+            if (ptr_err != hipSuccess || device_ptr != target_ptr) {
+                hipHostUnregister(target_ptr);
+                fprintf(stderr,
+                        "ds4_hip: registered host pointer is not directly usable by kernels (%s); falling back to unpinned HMM memory.\n",
+                        ptr_err == hipSuccess ? "device pointer differs" : hipGetErrorString(ptr_err));
+                return 1;
+            }
             // Hint: Read-mostly optimized for Strix Halo iGPU L2 / System Cache
             hipMemAdvise(target_ptr, reg_size, hipMemAdviseSetReadMostly, 0);
             
@@ -231,7 +473,8 @@ int ds4_hip_set_model_map_range(const void *model_map, uint64_t model_size, uint
             dim3 grid((num_pages + 255) / 256);
             kernel_prewarm<<<grid, block, 0, g_stream>>>((const char *)target_ptr, reg_size);
             hipStreamSynchronize(g_stream);
-            fprintf(stderr, "ds4_hip: Model mapped, pinned, and pre-warmed successfully.\n");
+            ds4_hip_remember_registered_range(target_ptr, reg_size);
+            fprintf(stderr, "ds4_hip: Model mapped, registered, and pre-warmed successfully.\n");
         } else {
             fprintf(stderr, "ds4_hip: hipHostRegister failed, falling back to unpinned HMM memory.\n");
         }
@@ -292,8 +535,8 @@ int ds4_hip_head_rms_norm_tensor(ds4_hip_tensor *x, uint32_t n_tok, uint32_t n_h
 }
 
 int ds4_hip_embed_token_hc_tensor(ds4_hip_tensor *out_hc, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t token, uint32_t n_embd, uint32_t n_hc) {
-    if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, n_embd * sizeof(float))) return 0;
-    if (!ds4_hip_ensure_scratch_buffer(&g_token_buffer, &g_token_capacity, sizeof(int32_t))) return 0;
+    if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, &g_embed_rows_async_alloc, n_embd * sizeof(float))) return 0;
+    if (!ds4_hip_ensure_scratch_buffer(&g_token_buffer, &g_token_capacity, &g_token_async_alloc, sizeof(int32_t))) return 0;
     int32_t t = token;
     if (hipMemcpyAsync(g_token_buffer, &t, sizeof(int32_t), hipMemcpyHostToDevice, g_stream) != hipSuccess) return 0;
     if (hipStreamSynchronize(g_stream) != hipSuccess) return 0;
@@ -354,7 +597,7 @@ int ds4_hip_attention_decode_raw_batch_heads_tensor(ds4_hip_tensor *heads, const
 
 int ds4_hip_attention_output_q8_batch_tensor(ds4_hip_tensor *out, ds4_hip_tensor *low, ds4_hip_tensor *group_tmp, ds4_hip_tensor *low_tmp, const void *model_map, uint64_t model_size, uint64_t out_a_offset, uint64_t out_b_offset, uint64_t group_dim, uint64_t rank, uint32_t n_groups, uint64_t out_dim, const ds4_hip_tensor *heads, uint32_t n_tokens) {
     struct ds4_hip_args_mul_mm_id args = {0}; args.ne00 = group_dim; args.ne02 = n_tokens; args.NE20 = n_groups; args.ne11 = n_groups; args.ne0 = rank; args.ne1 = n_tokens;
-    if (!ds4_hip_ensure_scratch_buffer(&g_attn_out_group_ids_buffer, &g_attn_out_group_ids_capacity, n_tokens * n_groups * sizeof(int32_t))) return 0;
+    if (!ds4_hip_ensure_scratch_buffer(&g_attn_out_group_ids_buffer, &g_attn_out_group_ids_capacity, &g_attn_out_group_ids_async_alloc, n_tokens * n_groups * sizeof(int32_t))) return 0;
     int32_t *ids_host = (int32_t *)malloc(n_tokens * n_groups * sizeof(int32_t));
     for (uint32_t t = 0; t < n_tokens; t++) for (uint32_t g = 0; g < n_groups; g++) ids_host[t * n_groups + g] = g;
     hipError_t copy_err = hipMemcpyAsync(g_attn_out_group_ids_buffer, ids_host, n_tokens * n_groups * sizeof(int32_t), hipMemcpyHostToDevice, g_stream);
@@ -528,7 +771,7 @@ int ds4_hip_hc_expand_add_split_tensor(ds4_hip_tensor *out_hc, const ds4_hip_ten
 // success with missing cache state.
 int ds4_hip_embed_tokens_hc_tensor(ds4_hip_tensor *out_hc, const ds4_hip_tensor *tokens, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint32_t n_vocab, uint32_t n_tokens, uint32_t n_embd, uint32_t n_hc) {
     if (!g_initialized && !ds4_hip_init()) return 0;
-    if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, n_tokens * n_embd * sizeof(float))) return 0;
+    if (!ds4_hip_ensure_scratch_buffer(&g_embed_rows_buffer, &g_embed_rows_capacity, &g_embed_rows_async_alloc, n_tokens * n_embd * sizeof(float))) return 0;
     struct ds4_hip_args_get_rows args = {0}; args.ne00 = n_embd; args.ne10 = n_tokens; args.nb01 = n_embd * sizeof(uint16_t); args.nb1 = n_embd * sizeof(float);
     kernel_get_rows_f32<<<dim3(n_tokens), 256, 0, g_stream>>>(args, (const char *)model_map + weight_offset, (const char *)tokens->ptr, (char *)g_embed_rows_buffer);
     for (uint32_t i = 0; i < n_hc; i++) hipMemcpyAsync((char *)out_hc->ptr + i * n_embd * n_tokens * sizeof(float), g_embed_rows_buffer, n_embd * n_tokens * sizeof(float), hipMemcpyDefault, g_stream);

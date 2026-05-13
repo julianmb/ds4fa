@@ -57,8 +57,8 @@ In this work, we present the architecture of \texttt{ds4fa}, a port targeting AM
 \subsection{APU Zero-Copy Integration}
 The most critical performance factor on an APU is the elimination of PCIe bus transfers. In \texttt{ds4fa}, we utilize the \texttt{hipHostMallocMapped} flag to allocate transient buffers and the KV cache. This establishes a Shared Virtual Addressing (SVA) space where the CPU and iGPU access the same physical memory pages. Unlike standard managed memory, this approach avoids OS-level page migration heuristics, yielding a deterministic zero-copy path equivalent to Apple's \texttt{MTLResourceStorageModeShared}.
 
-\subsection{ROCm 7.3 SOMA Memory Management}
-To handle the dynamic nature of LLM generation (e.g., top-k expert selection), we leverage the ROCm 7.3 Stream Ordered Memory Allocator (SOMA). By using \texttt{hipMallocAsync} and \texttt{hipFreeAsync}, memory reallocation is enqueued on the GPU command stream, preventing CPU synchronization stalls during the inference loop.
+\subsection{ROCm 7.2.3 SOMA Memory Management}
+To handle the dynamic nature of LLM generation (e.g., top-k expert selection), we use the HIP 7.2.x Stream Ordered Memory Allocator (SOMA) shipped with ROCm 7.2.3 when the runtime reports memory-pool support. The backend falls back to \texttt{hipMalloc} when SOMA is unavailable, preserving correctness on unsupported or mismatched installations.
 
 \section{Kernel Optimizations}
 \subsection{WMMA Matrix Acceleration}
@@ -82,14 +82,14 @@ DeepSeek V4 features native Multi-Token Prediction (MTP) modules. \texttt{ds4fa}
 The NPU generates $k$ future tokens into the unified zero-copy buffer, which the 40 CU iGPU then verifies in a single parallel batch. This division of labor exploits the NPU's power efficiency for sequential tasks and the iGPU's massive bandwidth for parallel verification.
 
 \section{Conclusion}
-\texttt{ds4fa} proves that high-parameter MoE inference is highly viable on AMD unified memory APUs. By combining ROCm 7.3's asynchronous memory management with RDNA 3.5's matrix cores and a hybrid NPU handoff, we achieve a hardware-native inference loop that maximizes the potential of the Strix Halo platform.
+\texttt{ds4fa} proves that high-parameter MoE inference is highly viable on AMD unified memory APUs. By combining ROCm 7.2.3's HIP runtime features with RDNA 3.5's matrix cores and a hybrid NPU handoff, we achieve a hardware-native inference loop that maximizes the potential of the Strix Halo platform.
 
 \section{Acknowledgements}
 This project is a derivative of \texttt{ds4} by Salvatore Sanfilippo. We acknowledge the foundational contributions of the \texttt{llama.cpp} and GGML projects. Technical development was assisted by the Gemini CLI AI agent.
 
 \begin{thebibliography}{9}
 \bibitem{ds4} S. Sanfilippo, "ds4: DeepSeek V4 Flash Inference Engine," 2026. [Online]. Available: \url{https://github.com/antirez/ds4}
-\bibitem{rocm} AMD, "ROCm Documentation and Release Notes v7.3," 2026.
+\bibitem{rocm} AMD, "ROCm Documentation and Release Notes v7.2.3," 2026.
 \bibitem{deepseek} DeepSeek-AI, "DeepSeek-V3 Technical Report," 2024.
 \bibitem{llamacpp} G. Gerganov, "llama.cpp: Port of Facebook's LLaMA model in C/C++," 2023.
 \end{thebibliography}

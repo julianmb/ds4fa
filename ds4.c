@@ -15830,12 +15830,14 @@ void ds4_engine_close(ds4_engine *e) {
     weights_free(&e->weights);
     vocab_free(&e->vocab);
     ds4_threads_shutdown();
-    if (e->mtp_ready) model_close(&e->mtp_model);
-    model_close(&e->model);
 #ifndef DS4_NO_ROCM
     if (e->npu_ready) ds4_npu_cleanup(e->npu_ctx);
+    /* HIP may have registered the mmap-backed model ranges. Unregister them
+     * before model_close() releases those mappings. */
     ds4_hip_cleanup();
 #endif
+    if (e->mtp_ready) model_close(&e->mtp_model);
+    model_close(&e->model);
     ds4_release_instance_lock();
     free(e);
 }
