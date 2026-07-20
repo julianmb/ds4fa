@@ -124,6 +124,16 @@ int main(void) {
     CHECK(ds4_gpu_cache_model_range(host_model, model_bytes, 0, model_bytes, "smoke"),
           "cache_model_range");
 
+    /* Model-swap exercise: re-register a different range a few times to catch
+     * leaks in the model-map / cache path that only surface across repeated
+     * loads (the common server pattern is load -> run -> unload -> load). */
+    for (int s = 0; s < 3; s++) {
+        CHECK(ds4_gpu_set_model_map(host_model, model_bytes), "set_model_map (swap)");
+        CHECK(ds4_gpu_cache_model_range(host_model, model_bytes, 0, model_bytes,
+                                        "smoke-swap"),
+              "cache_model_range (swap)");
+    }
+
     /* Optional real-model path: if DS4_TEST_MODEL points at a GGUF, map it and
      * cache a real range so the smoke test doubles as a "can I load a model"
      * gate. The mapping is freed after ds4_gpu_cleanup(). */

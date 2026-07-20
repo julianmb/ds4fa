@@ -47,7 +47,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-doctor ci
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-model-fit rocm-doctor ci
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -108,6 +108,7 @@ help:
 	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
 	@echo "  make rocm                Alias for make strix-halo"
 	@echo "  make rocm-smoke          Build and run the ROCm/Strix Halo hardware smoke test"
+	@echo "  make rocm-model-fit      Report whether DS4_TEST_MODEL fits the TTM/GTT limit"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test                Build and run tests"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
@@ -158,6 +159,17 @@ tests/rocm_bench_quick.o: tests/rocm_bench_quick.c ds4_gpu.h
 
 tests/rocm_bench_quick: tests/rocm_bench_quick.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o
 	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+tests/rocm_model_fit.o: tests/rocm_model_fit.c ds4_gpu.h
+	$(HIPCC) $(ROCM_CFLAGS) -I. -c -o $@ $<
+
+tests/rocm_model_fit: tests/rocm_model_fit.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o
+	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+# Report whether DS4_TEST_MODEL fits the TTM/GTT limit (per-model verdict).
+# Exit 0 = fits, 1 = does not fit / error, 2 = no DS4_TEST_MODEL set.
+rocm-model-fit: tests/rocm_model_fit
+	./tests/rocm_model_fit
 
 # Launch real compute kernels on gfx1151 and report bandwidth. Confirms the
 # kernel path actually executes (not just malloc).

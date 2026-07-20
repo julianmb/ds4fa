@@ -34,3 +34,8 @@ __pycache__/
 .*.swp
 .DS_Store
 /tests/rocm_smoke
+/tests/rocm_bench_quick
+/tests/rocm_model_fit
+/tests/rocm_smoke.o
+/tests/rocm_bench_quick.o
+/tests/rocm_model_fit.o

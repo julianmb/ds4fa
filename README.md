@@ -211,16 +211,18 @@ for `gfx1151`.
 
 ## Tests and CI
 
-The `make rocm-smoke`, `make rocm-diag`, `make rocm-bench-quick`, `make rocm-doctor`,
-and `make ci` targets are documented in the **Run it yourself** section above. In
-short: `rocm-smoke` exercises allocation/copy/mapping (and a real model when
-`DS4_TEST_MODEL` is set) and now also checks for device-memory leaks across the
-alloc/free cycles; `rocm-diag` prints only the profile; `rocm-bench-quick` runs a
-fill+copy + a managed-tensor round-trip on gfx1151 and reports bandwidth;
-`rocm-doctor` is a one-screen triage for "is this box set up correctly?";
-`ci` runs the strict smoke test, the quick bench, and `misc/sync-check.sh`. Set
-`DS4_ROCM_DIAG=FILE` on any run to also write a machine-readable `key=value`
-(or JSON with `DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
+The `make rocm-smoke`, `make rocm-diag`, `make rocm-bench-quick`, `make rocm-model-fit`,
+`make rocm-doctor`, and `make ci` targets are documented in the **Run it yourself**
+section above. In short: `rocm-smoke` exercises allocation/copy/mapping (and a real
+model when `DS4_TEST_MODEL` is set) and checks for device-memory leaks across
+alloc/free cycles *and* repeated model swaps; `rocm-diag` prints only the profile;
+`rocm-bench-quick` runs a fill+copy + a managed-tensor round-trip on gfx1151 and
+reports bandwidth; `rocm-model-fit` reports whether `DS4_TEST_MODEL` fits the
+TTM/GTT limit (exit 0 = fits, 1 = does not fit, 2 = no model set); `rocm-doctor`
+is a one-screen triage for "is this box set up correctly?"; `ci` runs the strict
+smoke test, the quick bench, and `misc/sync-check.sh`. Set `DS4_ROCM_DIAG=FILE` on
+any run to also write a machine-readable `key=value` (or JSON with
+`DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
 
 ## Environment variables (ROCm / Strix Halo)
 
