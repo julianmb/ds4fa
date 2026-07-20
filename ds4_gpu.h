@@ -209,6 +209,11 @@ int ds4_gpu_stream_expert_cache_seed_experts(
         uint32_t                           n_experts);
 void ds4_gpu_print_memory_report(const char *label);
 
+/* Number of WARNING-level Strix Halo diagnostics emitted this process. Used by
+ * the ROCm smoke test's strict mode. Always defined; returns 0 on non-ROCm
+ * builds. */
+int ds4_rocm_warning_count(void);
+
 /* Tensor-parallel per-layer gates (Metal only).  The encoder calls
  * ds4_gpu_tp_gate_encode() right after the kernels that produce a partial
  * block output in the TP slab: it closes the current encoder, makes the GPU

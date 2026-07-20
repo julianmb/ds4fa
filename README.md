@@ -102,8 +102,11 @@ runtime profile. On a misconfigured machine it also prints actionable
 warnings (e.g. a low TTM/GTT limit).
 
 You can also run `make rocm-diag` to print only the runtime profile (no model
-needed), or set `DS4_ROCM_DIAG=FILE` on any run to also append a machine-readable
-`key=value` summary for CI and bug reports.
+needed), `make rocm-bench-quick` to confirm compute kernels actually execute on
+gfx1151 and report bandwidth, or `make ci` to run the strict smoke test, the
+quick bench, and the upstream-divergence policy check. Set `DS4_ROCM_DIAG=FILE`
+on any run to also write a machine-readable `key=value` (or JSON with
+`DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
 
 ## Environment variables (ROCm / Strix Halo)
 
@@ -111,10 +114,14 @@ needed), or set `DS4_ROCM_DIAG=FILE` on any run to also append a machine-readabl
   (e.g. `8126464` ≈ 31 GiB). Useful without changing the system.
 - `DS4_ROCM_TTM_AUTORAISE` — if set (non-`0`), the engine attempts to raise the
   limit via `amd-ttm --set-pages` when a model would not fit. Requires root.
-- `DS4_ROCM_DIAG` — path to a file where the startup profile is appended as
-  `key=value` lines.
+- `DS4_ROCM_DIAG` — path to a file where the startup profile is written (truncated
+  each run) as `key=value` lines.
+- `DS4_ROCM_DIAG_JSON` — if set (non-`0`), `DS4_ROCM_DIAG` is written as JSON
+  instead of `key=value`.
 - `DS4_TEST_MODEL` — when set for `make rocm-smoke`, the smoke test additionally
   maps and caches the given GGUF, acting as a "can I load a model" gate.
+- `ROCM_SMOKE_STRICT` — if set (non-`0`), `make rocm-smoke` / `make ci` fails when
+  any configuration warning (e.g. low TTM/GTT limit) is emitted.
 
 ## Running a model
 

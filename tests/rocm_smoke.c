@@ -125,6 +125,18 @@ cleanup:
     if (host_model) free(host_model);
     if (real_base) munmap(real_base, (size_t)real_size);
 
+    /* Strict mode: configuration warnings (e.g. low TTM/GTT limit) become
+     * failures so CI catches a misconfigured machine. */
+    const char *strict = getenv("ROCM_SMOKE_STRICT");
+    if (strict && strict[0] != '\0' && strcmp(strict, "0") != 0) {
+        const int warnings = ds4_rocm_warning_count();
+        if (warnings > 0) {
+            fprintf(stderr, "rocm-smoke: FAIL: %d configuration warning(s) "
+                    "emitted (ROCM_SMOKE_STRICT).\n", warnings);
+            g_failed = 1;
+        }
+    }
+
     if (g_failed) {
         fprintf(stderr, "rocm-smoke: FAILED\n");
         return 1;

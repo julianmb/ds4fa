@@ -5730,6 +5730,13 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
 
 #include <stdarg.h>
 
+/* Count of WARNING-level diagnostics emitted this process. Used by the smoke
+ * test's strict mode (ROCM_SMOKE_STRICT) to turn configuration warnings into
+ * test failures. */
+static int g_ds4_rocm_warnings = 0;
+
+int ds4_rocm_warning_count(void) { return g_ds4_rocm_warnings; }
+
 /* Read total system RAM in bytes from /proc/meminfo. Returns 0 on failure. */
 static uint64_t ds4_rocm_total_system_memory(void) {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -5818,11 +5825,15 @@ static const char *ds4_rocm_format_version(int version, char *buf, size_t buflen
 }
 
 /* Warn when the machine exposes less than 75 percent of RAM through TTM/GTT, a
- * common BIOS VRAM carveout misconfiguration on Strix Halo. */
+ * common BIOS VRAM carveout misconfiguration on Strix Halo. Also print the
+ * exact `amd-ttm --set-pages` value that would reach 90% of RAM so the user can
+ * copy-paste the fix. */
 static void ds4_rocm_check_ttm_limit(uint64_t total_ram, uint64_t ttm_bytes) {
     if (total_ram == 0 || ttm_bytes == 0) return;
     const double frac = (double)ttm_bytes / (double)total_ram;
     if (frac < 0.75) {
+        const uint64_t target = (uint64_t)(0.90 * (double)total_ram);
+        const uint64_t target_pages = (target + 4095ull) / 4096ull;
         fprintf(stderr,
                 DS4_GPU_LOG_PREFIX "WARNING: TTM/GTT mapping limit is %.1f%% of "
                 "system RAM (%.1f/%.1f GiB). Increase the GTT limit via "
@@ -5831,6 +5842,12 @@ static void ds4_rocm_check_ttm_limit(uint64_t total_ram, uint64_t ttm_bytes) {
                 100.0 * frac,
                 (double)ttm_bytes / 1073741824.0,
                 (double)total_ram / 1073741824.0);
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "SUGGESTED: sudo amd-ttm --set-pages %llu "
+                "(raises GTT to ~90%% of %.1f GiB RAM)\n",
+                (unsigned long long)target_pages,
+                (double)total_ram / 1073741824.0);
+        g_ds4_rocm_warnings++;
     }
 }
 
@@ -5847,20 +5864,39 @@ static void ds4_rocm_check_model_fits_ttm(uint64_t model_bytes, uint64_t ttm_byt
                 (double)model_bytes / 1073741824.0,
                 (double)(ttm_bytes > model_bytes ? ttm_bytes - model_bytes : 0) / 1073741824.0,
                 (double)ttm_bytes / 1073741824.0);
+        g_ds4_rocm_warnings++;
     }
 }
 
 /* Optional machine-readable diagnostics. When DS4_ROCM_DIAG is set to a path,
- * the runtime profile is also appended there as key=value lines for CI and
- * bug reports. */
+ * the runtime profile is written there. The file is truncated (not appended) on
+ * each run, and a timestamp marks the block. Set DS4_ROCM_DIAG_JSON=1 to emit
+ * JSON instead of key=value lines. */
+static int ds4_rocm_diag_json(void) {
+    const char *env = getenv("DS4_ROCM_DIAG_JSON");
+    return env && env[0] != '\0' && strcmp(env, "0") != 0;
+}
+
 static FILE *ds4_rocm_diag_open(void) {
     const char *path = getenv("DS4_ROCM_DIAG");
     if (path == NULL || path[0] == '\0') return NULL;
-    FILE *f = fopen(path, "a");
+    FILE *f = fopen(path, "w");
     if (!f) {
         fprintf(stderr,
                 DS4_GPU_LOG_PREFIX "could not open DS4_ROCM_DIAG=%s: %s\n",
                 path, strerror(errno));
+        return NULL;
+    }
+    if (ds4_rocm_diag_json()) {
+        fprintf(f, "{\n");
+    } else {
+        time_t now = time(NULL);
+        char buf[64];
+        struct tm tm_now;
+        if (localtime_r(&now, &tm_now) &&
+            strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S%z", &tm_now)) {
+            fprintf(f, "# ds4 rocm diag %s\n", buf);
+        }
     }
     return f;
 }
@@ -5869,10 +5905,25 @@ static void ds4_rocm_diag_kv(FILE *f, const char *key, const char *fmt, ...) {
     if (!f) return;
     va_list ap;
     va_start(ap, fmt);
-    fprintf(f, "%s=", key);
-    vfprintf(f, fmt, ap);
-    fprintf(f, "\n");
+    if (ds4_rocm_diag_json()) {
+        static int s_first = 1;
+        fprintf(f, "%s  \"%s\": \"", s_first ? "\n" : ",\n", key);
+        vfprintf(f, fmt, ap);
+        fprintf(f, "\"");
+        s_first = 0;
+    } else {
+        fprintf(f, "%s=", key);
+        vfprintf(f, fmt, ap);
+        fprintf(f, "\n");
+    }
     va_end(ap);
+}
+
+/* Close the diag file, terminating JSON if needed. */
+static void ds4_rocm_diag_close(FILE *f) {
+    if (!f) return;
+    if (ds4_rocm_diag_json()) fprintf(f, "\n}\n");
+    fclose(f);
 }
 
 /* Probe amd-smi / rocm-smi availability. On headless Strix Halo boxes these may
@@ -5887,6 +5938,27 @@ static void ds4_rocm_probe_smi(void) {
                 "telemetry is unavailable (engine is unaffected). Install the "
                 "rocm-smi package for utilization/power readings.\n");
     }
+}
+
+/* Read the amdgpu.gttsize boot parameter (MiB) from /proc/cmdline, or 0 if not
+ * set / unreadable. Used to detect when a configured GTT size did not take
+ * effect against the live pages_limit. */
+static uint64_t ds4_rocm_cmdline_gttsize_mib(void) {
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f) return 0;
+    char line[2048];
+    uint64_t mib = 0;
+    if (fgets(line, sizeof(line), f)) {
+        const char *p = strstr(line, "amdgpu.gttsize=");
+        if (p) {
+            const char *v = p + strlen("amdgpu.gttsize=");
+            char *end = NULL;
+            long long val = strtoll(v, &end, 10);
+            if (end != v && val > 0) mib = (uint64_t)val;
+        }
+    }
+    fclose(f);
+    return mib;
 }
 
 static void ds4_rocm_print_profile(void) {
@@ -5917,6 +5989,7 @@ static void ds4_rocm_print_profile(void) {
                 DS4_GPU_LOG_PREFIX "WARNING: device architecture is %s, not "
                 "gfx1151 (Strix Halo). Kernels are compiled for gfx1151 and may "
                 "not run correctly.\n", prop.gcnArchName);
+        g_ds4_rocm_warnings++;
     }
 
     const int hip_major = HIP_VERSION_MAJOR;
@@ -5927,6 +6000,7 @@ static void ds4_rocm_print_profile(void) {
                 "ROCm 7.2.x baseline. Some kernels or the ROCm backend may "
                 "behave unexpectedly.\n",
                 ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)));
+        g_ds4_rocm_warnings++;
     }
 
     int managed = 0, concurrent_managed = 0, pageable = 0;
@@ -5968,6 +6042,20 @@ static void ds4_rocm_print_profile(void) {
                 (double)ttm_env / 1073741824.0,
                 (ttm_kernel > 0 && ttm_env != ttm_kernel) ? " (DS4_ROCM_TTM_PAGES override)" : "");
         ds4_rocm_check_ttm_limit(total_ram, ttm_env);
+        const uint64_t gtt_mib = ds4_rocm_cmdline_gttsize_mib();
+        if (gtt_mib > 0) {
+            const uint64_t gtt_bytes = gtt_mib * 1048576ull;
+            if (ttm_env + 1073741824ull < gtt_bytes) {
+                fprintf(stderr,
+                        DS4_GPU_LOG_PREFIX "NOTE: amdgpu.gttsize=%llu MiB "
+                        "(%.1f GiB) is set but the live TTM/GTT limit is only "
+                        "%.1f GiB. The boot parameter may not have taken effect "
+                        "(re-check GRUB/kernel cmdline) or a larger BIOS VRAM "
+                        "carveout is reducing the available GTT.\n",
+                        (unsigned long long)gtt_mib, (double)gtt_bytes / 1073741824.0,
+                        (double)ttm_env / 1073741824.0);
+            }
+        }
     } else {
         fprintf(stderr,
                 DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: unknown (could not "
@@ -5994,7 +6082,10 @@ static void ds4_rocm_print_profile(void) {
             ds4_rocm_diag_kv(diag, "ds4_rocm_system_ram_bytes", "%llu", (unsigned long long)total_ram);
         if (ttm_env)
             ds4_rocm_diag_kv(diag, "ds4_rocm_ttm_limit_bytes", "%llu", (unsigned long long)ttm_env);
-        fclose(diag);
+        const uint64_t gtt_mib = ds4_rocm_cmdline_gttsize_mib();
+        if (gtt_mib)
+            ds4_rocm_diag_kv(diag, "ds4_rocm_cmdline_gttsize_mib", "%llu", (unsigned long long)gtt_mib);
+        ds4_rocm_diag_close(diag);
     }
 #else
     (void)ds4_rocm_check_model_fits_ttm;

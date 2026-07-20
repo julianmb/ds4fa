@@ -191,3 +191,30 @@ Run it normally:
 ```
 
 The ROCm build uses the Strix Halo backend automatically.
+
+## 7. Known limitations
+
+### `pageable-access=0`
+
+On some Strix Halo setups the device reports `pageable-access=0` in the startup
+profile. The engine's managed-KV-cache path (`ds4_gpu_should_use_managed_kv_cache`)
+assumes demand-paged, pageable host memory for good throughput on very large KV
+caches. Without pageable access:
+
+- Large KV caches may be slower, or may consume more device-resident memory than
+  necessary.
+- You may need to rely on device-only allocation (smaller context) or SSD
+  streaming for models that would otherwise use the managed path.
+
+This is a driver/platform property, not a DS4 bug. If you see it, check your
+kernel/KFD build (Ubuntu 26.04 or Linux 6.18.4+ with the Strix Halo fixes) and
+the ROCm release notes for the `pageable-memory-access` capability on gfx1151.
+
+### GTT is dynamic, not reserved
+
+Raising `amdgpu.gttsize` / `ttm.pages_limit` does **not** carve RAM away from the
+OS; it only raises the ceiling the GPU can map on demand. If the diagnostic shows
+`amdgpu.gttsize=N MiB` set but the live TTM/GTT limit is much lower, the boot
+parameter did not take effect (re-check GRUB) or a large BIOS VRAM carveout is
+reducing the available GTT.
+

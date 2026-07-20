@@ -64,3 +64,15 @@ Metal backend and the current ROCm architecture.
 - Do **not** reintroduce rejected `ds4fa` components.
 - Do **not** replace upstream allocation/cache lifetimes (e.g. with
   `hipMallocAsync`) without profiling and broad regression testing.
+
+### Tooling
+
+- `make rocm-smoke` — allocation/copy/cleanup + optional real-model smoke.
+- `make rocm-diag` — print only the runtime profile.
+- `make rocm-bench-quick` — confirm gfx1151 kernels execute and report bandwidth.
+- `make ci` — strict smoke test + quick bench + `misc/sync-check.sh`.
+- `misc/sync-check.sh` — enforces the divergence policy (fails if too far behind
+  upstream, or too far ahead without a `FORK_NOTES.md` update).
+- `misc/sync.sh` — fetches upstream, runs the policy check, and rebases the
+  current branch onto `upstream/main`.
+
