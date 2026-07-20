@@ -47,7 +47,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -107,6 +107,7 @@ help:
 	@echo "  make cuda CUDA_ARCH=sm_N Build CUDA with an explicit nvcc -arch value"
 	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
 	@echo "  make rocm                Alias for make strix-halo"
+	@echo "  make rocm-smoke          Build and run the ROCm/Strix Halo hardware smoke test"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test                Build and run tests"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
@@ -135,6 +136,15 @@ strix-halo:
 		DS4_LINK_LIBS="$(ROCM_LDLIBS)"
 
 rocm: strix-halo
+
+tests/rocm_smoke.o: tests/rocm_smoke.c ds4_gpu.h
+	$(HIPCC) $(ROCM_CFLAGS) -I. -c -o $@ $<
+
+tests/rocm_smoke: tests/rocm_smoke.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o
+	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+rocm-smoke: tests/rocm_smoke
+	./tests/rocm_smoke
 
 ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
 	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
@@ -402,4 +412,5 @@ q4k-dot-test: tests/test_q4k_dot.c
 	./tests/test_q4k_dot
 
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official tests/test_q4k_dot tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o 	tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o \
+	tests/rocm_smoke tests/rocm_smoke.o

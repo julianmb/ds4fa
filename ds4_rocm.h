@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hip/hip_version.h>
 #include <hip/hip_runtime.h>
 #include <hipblas/hipblas.h>
 #include <hip/hip_fp16.h>

@@ -24,9 +24,9 @@ No Ubuntu package currently provides those internal headers. Install a complete
 matching rocWMMA header tree:
 
 ```sh
-git clone --depth 1 --branch rocm-7.1.0 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA-rocm-7.1.0
+git clone --depth 1 --branch rocm-7.2.3 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA-rocm-7.2.3
 sudo mkdir -p /usr/local/include
-sudo cp -a /tmp/rocWMMA-rocm-7.1.0/library/include/rocwmma /usr/local/include/
+sudo cp -a /tmp/rocWMMA-rocm-7.2.3/library/include/rocwmma /usr/local/include/
 ```
 
 If ROCm is installed under `/usr` but tooling expects `/opt/rocm`, add these
@@ -56,13 +56,30 @@ rocminfo | grep -A80 'Name:                    gfx1151'
 If DS4 says `no ROCm-capable device is detected`, check that `rocminfo` can open
 `/dev/kfd` and that `groups` includes `render`.
 
-## 3. Increase GPU-visible memory
+## 3. Increase GPU-visible memory (TTM/GTT limit)
 
-A 128 GB Strix Halo system may initially expose only about 62 GB of GPU-visible
-memory. DS4 needs the larger GTT aperture for the 80.76 GiB model plus runtime
-buffers.
+Strix Halo uses unified physical memory. A large **BIOS dedicated-VRAM carveout**
+permanently removes RAM from the operating system and helps compute very little.
+AMD recommends a small reservation (for example **512 MB**) and a larger dynamic
+**TTM/GTT** mapping limit instead.
 
-Use these kernel parameters:
+> GTT is a **dynamic mapping limit**, not permanently reserved memory. Raising it
+> does not carve out RAM; it raises the ceiling the GPU can map on demand.
+
+### Preferred: AMD `amd-ttm`
+
+AMD provides the `amd-ttm` helper to inspect or set the limit without rebooting
+or editing boot parameters:
+
+```sh
+amd-ttm --show
+sudo amd-ttm --set-pages <pages>     # 4 KiB pages; e.g. 32505856 ≈ 124 GiB
+```
+
+### Fallback: kernel parameters
+
+If `amd-ttm` is unavailable, raise the limit via boot parameters. A 128 GB
+Strix Halo system may otherwise expose only about 62 GB of GPU-visible memory;
 
 ```text
 amd_iommu=off amdgpu.gttsize=126976 ttm.pages_limit=32505856 ttm.page_pool_size=32505856
@@ -88,12 +105,13 @@ sudo update-grub
 sudo reboot
 ```
 
-After reboot, verify:
+After reboot (or after `amd-ttm --set-pages`), verify:
 
 ```sh
 cat /proc/cmdline
 sudo dmesg | grep -Ei 'GTT|gttsize|TTM|VRAM'
 rocminfo | grep -A80 'Name:                    gfx1151'
+cat /sys/module/ttm/parameters/pages_limit      # or amdttm / amd_ttm
 ```
 
 Expected signs:
@@ -102,6 +120,9 @@ Expected signs:
 amdgpu:  126976M of GTT memory ready
 rocminfo gfx1151 pool: 130023424 KB
 ```
+
+The `ds4-strix-halo` startup diagnostics print the TTM/GTT mapping limit and
+warn when it is below 75% of system RAM or when a model is sized too close to it.
 
 ## 4. Build DS4
 

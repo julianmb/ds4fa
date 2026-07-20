@@ -5718,6 +5718,176 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
 }
 
 
+/* =========================================================================
+ * Strix Halo / ROCm runtime diagnostics.
+ * =========================================================================
+ *
+ * These helpers print a runtime profile and surface common Strix Halo memory
+ * and driver misconfigurations. They are ROCm-only and live here so the rest
+ * of the backend can stay CUDA-portable through the hip-mapped compatibility
+ * layer.
+ */
+
+/* Read total system RAM in bytes from /proc/meminfo. Returns 0 on failure. */
+static uint64_t ds4_rocm_total_system_memory(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return 0;
+    uint64_t kb = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "MemTotal: %llu kB", (unsigned long long *)&kb) == 1) break;
+    }
+    fclose(f);
+    return kb * 1024ull;
+}
+
+/* Read the TTM/GTT pages_limit from the relevant module parameter and return
+ * the mapped byte limit, or 0 if it cannot be determined. Module names differ
+ * across ROCm/KFD versions: ttm, amdttm, and amd_ttm. */
+static uint64_t ds4_rocm_ttm_pages_limit_bytes(void) {
+    static const char *const paths[] = {
+        "/sys/module/ttm/parameters/pages_limit",
+        "/sys/module/amdttm/parameters/pages_limit",
+        "/sys/module/amd_ttm/parameters/pages_limit",
+        NULL
+    };
+    for (int i = 0; paths[i]; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        long long pages = -1;
+        if (fscanf(f, "%lld", &pages) == 1 && pages > 0) {
+            fclose(f);
+            /* pages_limit is expressed in 4 KiB pages. */
+            return (uint64_t)pages * 4096ull;
+        }
+        fclose(f);
+    }
+    return 0;
+}
+
+/* Format a HIP version packed as (major*100 + minor)*100 + patch into a string
+ * buffer. Returns the same buffer for convenience. */
+static const char *ds4_rocm_format_version(int version, char *buf, size_t buflen) {
+    if (!buf || buflen == 0) return "(invalid)";
+    int major = version / 10000;
+    int minor = (version % 10000) / 100;
+    int patch = version % 100;
+    snprintf(buf, buflen, "%d.%d.%d", major, minor, patch);
+    return buf;
+}
+
+/* Warn when the machine exposes less than 75 percent of RAM through TTM/GTT, a
+ * common BIOS VRAM carveout misconfiguration on Strix Halo. */
+static void ds4_rocm_check_ttm_limit(uint64_t total_ram, uint64_t ttm_bytes) {
+    if (total_ram == 0 || ttm_bytes == 0) return;
+    const double frac = (double)ttm_bytes / (double)total_ram;
+    if (frac < 0.75) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "WARNING: TTM/GTT mapping limit is %.1f%% of "
+                "system RAM (%.1f/%.1f GiB). Increase the GTT limit via "
+                "amd-ttm or the ttm pages_limit; a large BIOS VRAM carveout is "
+                "likely starving the OS of memory.\n",
+                100.0 * frac,
+                (double)ttm_bytes / 1073741824.0,
+                (double)total_ram / 1073741824.0);
+    }
+}
+
+/* Warn when a model is sized so close to the TTM/GTT limit that less than
+ * roughly 8 GiB remains for runtime state. */
+static void ds4_rocm_check_model_fits_ttm(uint64_t model_bytes, uint64_t ttm_bytes) {
+    if (model_bytes == 0 || ttm_bytes == 0) return;
+    const uint64_t reserved = 8ull * 1073741824ull;
+    if (model_bytes > ttm_bytes || ttm_bytes - model_bytes < reserved) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "WARNING: model range (%.1f GiB) leaves only "
+                "%.1f GiB of the %.1f GiB TTM/GTT mapping limit for runtime "
+                "state. Lower the BIOS VRAM carveout or raise the GTT limit.\n",
+                (double)model_bytes / 1073741824.0,
+                (double)(ttm_bytes > model_bytes ? ttm_bytes - model_bytes : 0) / 1073741824.0,
+                (double)ttm_bytes / 1073741824.0);
+    }
+}
+
+static void ds4_rocm_print_profile(void) {
+#ifdef __HIP_PLATFORM_AMD__
+    int dev = 0;
+    if (!cuda_ok(cudaSetDevice(dev), "set device")) return;
+    cudaDeviceProp prop;
+    if (cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return;
+
+    char build_ver[32], runtime_ver[32], driver_ver[32];
+    int runtime_version = 0;
+    int driver_version = 0;
+    (void)hipRuntimeGetVersion(&runtime_version);
+    (void)hipDriverGetVersion(&driver_version);
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "Strix Halo profile: device=%s gcnArchName=%s\n",
+            prop.name, prop.gcnArchName);
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "ROCm build=%s runtime=%s driver=%s "
+            "(tested baseline ROCm 7.2.3)\n",
+            ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)),
+            ds4_rocm_format_version(runtime_version, runtime_ver, sizeof(runtime_ver)),
+            ds4_rocm_format_version(driver_version, driver_ver, sizeof(driver_ver)));
+
+    if (strcmp(prop.gcnArchName, "gfx1151") != 0 &&
+        strstr(prop.gcnArchName, "gfx1151") == NULL) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "WARNING: device architecture is %s, not "
+                "gfx1151 (Strix Halo). Kernels are compiled for gfx1151 and may "
+                "not run correctly.\n", prop.gcnArchName);
+    }
+
+    const int hip_major = HIP_VERSION_MAJOR;
+    const int hip_minor = HIP_VERSION_MINOR;
+    if (hip_major < 7 || (hip_major == 7 && hip_minor < 2)) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "WARNING: HIP %s is older than the tested "
+                "ROCm 7.2.x baseline. Some kernels or the ROCm backend may "
+                "behave unexpectedly.\n",
+                ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)));
+    }
+
+    int managed = 0, concurrent_managed = 0, pageable = 0;
+    (void)hipDeviceGetAttribute(&managed, hipDeviceAttributeManagedMemory, dev);
+    (void)hipDeviceGetAttribute(&concurrent_managed,
+                                hipDeviceAttributeConcurrentManagedAccess, dev);
+    (void)hipDeviceGetAttribute(&pageable, hipDeviceAttributePageableMemoryAccess, dev);
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "managed-memory=%d concurrent-managed=%d "
+            "pageable-access=%d\n", managed, concurrent_managed, pageable);
+
+    size_t free_b = 0, total_b = 0;
+    if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "HIP-visible memory: %.1f GiB free / %.1f GiB total\n",
+                (double)free_b / 1073741824.0, (double)total_b / 1073741824.0);
+    }
+
+    const uint64_t total_ram = ds4_rocm_total_system_memory();
+    const uint64_t ttm_bytes = ds4_rocm_ttm_pages_limit_bytes();
+    if (total_ram > 0) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "system memory: %.1f GiB total\n",
+                (double)total_ram / 1073741824.0);
+    }
+    if (ttm_bytes > 0) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: %.1f GiB\n",
+                (double)ttm_bytes / 1073741824.0);
+        ds4_rocm_check_ttm_limit(total_ram, ttm_bytes);
+    } else {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: unknown (could not "
+                "read ttm/amd_ttm pages_limit). A low GTT limit can OOM large "
+                "models; check amd-ttm.\n");
+    }
+#else
+    (void)ds4_rocm_check_model_fits_ttm;
+#endif
+}
+
 extern "C" int ds4_gpu_init(void) {
     int dev = 0;
     if (!cuda_ok(cudaSetDevice(dev), "set device")) return 0;
@@ -5726,6 +5896,9 @@ extern "C" int ds4_gpu_init(void) {
         fprintf(stderr, DS4_GPU_LOG_PREFIX "backend initialized on %s (sm_%d%d)\n",
                 prop.name, prop.major, prop.minor);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    ds4_rocm_print_profile();
+#endif
     if (!g_cublas_ready) {
         if (!cublas_ok(cublasCreate(&g_cublas), "create handle")) return 0;
         const cublasMath_t math_mode = g_quality_mode ? CUBLAS_DEFAULT_MATH : CUBLAS_TF32_TENSOR_OP_MATH;
@@ -6020,6 +6193,12 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
     /* Strix Halo uses the staged full-copy path in ds4_gpu_set_model_map_range().
      * Avoid host-registering the mmap here: that would make the staged copier
      * believe the model is already device-resident. */
+#ifdef __HIP_PLATFORM_AMD__
+    const uint64_t ttm_bytes = ds4_rocm_ttm_pages_limit_bytes();
+    if (ttm_bytes > 0) ds4_rocm_check_model_fits_ttm(model_size, ttm_bytes);
+#else
+    (void)ds4_rocm_check_model_fits_ttm;
+#endif
     return 1;
 }
 
