@@ -1,6 +1,6 @@
 # ds4-strix-halo
 
-A Strix Halo (`gfx1151`) tuned fork of [DwarfStar (ds4)](https://github.com/antirez/ds4).
+A Strix Halo (`gfx1151`) tuned **adaptation** of [DwarfStar (ds4)](https://github.com/antirez/ds4).
 
 This repository tracks upstream DS4 inference development and carries forward the
 Strix Halo / ROCm tuning and diagnostics for AMD Ryzen AI MAX+ ("Strix Halo")
@@ -22,21 +22,65 @@ guidance.
 Everything else (model support, server, agent, SSD streaming, speculative
 decoding) is upstream DS4 and is documented upstream.
 
-## What this fork changes
+## Adaptation: improvements over upstream ds4
+
+This repository is an **adaptation** of `antirez/ds4` for AMD Strix Halo
+(`gfx1151`) hardware. It keeps upstream's ROCm inference backend intact and adds a
+Strix-Halo-specific configuration, diagnostics, and validation layer on top. The
+improvements over stock ds4 are:
+
+- **Startup hardware profile.** On `ds4_gpu_init()` the engine prints a Strix Halo
+  profile — device name, `gcnArchName` (must be `gfx1151`), HIP/ROCm build/runtime/
+  driver versions (baseline ROCm 7.2.3), managed / concurrent-managed / pageable
+  memory support, HIP-visible memory, system RAM, and the live TTM/GTT mapping
+  limit. Upstream ds4 prints none of this.
+- **Misconfiguration detection at startup.** The engine warns on a non-`gfx1151`
+  arch, HIP older than the 7.2.x baseline, a TTM/GTT limit below 75% of system RAM,
+  and a model sized too close to that limit (less than ~8 GiB headroom). It also
+  cross-checks the `amdgpu.gttsize` boot parameter against the live limit so a boot
+  param that "didn't take" is visible.
+- **Actionable fix, not just a warning.** When the limit is low it prints the exact
+  `sudo amd-ttm --set-pages N` command that raises it to ~90% of RAM, and it
+  suggests a value derived from the box's own RAM.
+- **Runtime TTM control.** `DS4_ROCM_TTM_PAGES` overrides the limit for a single run
+  (highest priority), and `DS4_ROCM_TTM_AUTORAISE=1` lets the engine call `amd-ttm`
+  itself (as root) when a model wouldn't fit. `DS4_ROCM_AUTO_RAISE_ONCE=1` bounds
+  that to one raise per process across server reloads / eval restarts.
+- **Per-model fit verdict.** The engine records, for every model map, whether it
+  fits the GTT limit (headroom, would-OOM, and GGUF header info), exposed via
+  `ds4_rocm_last_model_load_estimate()`. `make rocm-model-fit` turns that into a
+  pass/fail gate for `DS4_TEST_MODEL`.
+- **Machine-readable diagnostics.** `DS4_ROCM_DIAG` writes the profile to a file as
+  `key=value` (or JSON with `DS4_ROCM_DIAG_JSON=1`), scoped by `DS4_ROCM_DIAG_FIELDS`
+  (`basic` / `full` / `all`) for CI and bug reports. These build-version includes
+  come from `ds4_rocm.h`'s `<hip/hip_version.h>` pull-in.
+- **Hardware smoke + quick-bench tests.** `make rocm-smoke` exercises the real
+  `ds4_gpu` allocation/copy/mapping/managed-tensor paths (plus an optional real-GGUF
+  gate and a model-swap leak check) without needing weights; `make rocm-bench-quick`
+  confirms gfx1151 kernels actually execute and reports bandwidth; `make rocm-doctor`
+  is a one-screen triage (OS, permissions, gfx1151, TTM/GTT, amd-ttm, tuned, udev,
+  BIOS VRAM, profile, bench, model-fit).
+- **One-shot Ubuntu 26.04 setup.** `misc/strix-halo-ubuntu26-setup.sh` applies the
+  persistent GRUB/modprobe/udev/tuned configuration (RAM-sized, CWSR off) and
+  enforces the 26.04 requirement; `misc/99-amd-kfd.rules` ships the GPU-access udev
+  rules. Upstream ds4 has no equivalent.
+- **CI policy guard.** `make ci` runs the strict smoke test, the quick bench, and
+  `misc/sync-check.sh` (which keeps the fork close to upstream ds4).
+
+Everything diagnostic is **advisory**: it prints to stderr and (optionally) a file,
+and never alters how inference executes. The adaptation adds no new inference path —
+it reuses upstream's ROCm backend.
+
+Specific files changed vs upstream:
 
 - `ds4_rocm.h`: includes `<hip/hip_version.h>` for build-version diagnostics.
-- `rocm/ds4_rocm_runtime.cuh`: prints a Strix Halo runtime profile during
-  `ds4_gpu_init()` (device name, `gcnArchName`, HIP/ROCm versions,
-  managed/concurrent-managed/pageable memory support, HIP-visible memory,
-  system RAM, and the TTM/GTT mapping limit) and warns about:
-  - non-`gfx1151` architectures,
-  - HIP older than the 7.2.x baseline,
-  - a TTM/GTT limit below 75% of system RAM,
-  - a model sized too close to the TTM/GTT limit.
-- `tests/rocm_smoke.c` + `Makefile` `rocm-smoke` target: a hardware smoke test
-  against the current `ds4_gpu` API (allocation, fill, copy, managed tensors,
-  page-aligned host model range mapping, model-range caching, and ordered
-  cleanup).
+- `rocm/ds4_rocm_runtime.cuh`: the startup profile, warnings, TTM checks/autoraise,
+  model-fit estimate, and machine-readable diag described above.
+- `ds4_gpu.h`: declares the model-fit estimate struct and `ds4_gpu_hip_free_bytes()`.
+- `tests/rocm_smoke.c`, `tests/rocm_bench_quick.c`, `tests/rocm_model_fit.c` +
+  `Makefile` `rocm-*` targets: the hardware validation suite.
+- `misc/strix-halo-ubuntu26-setup.sh`, `misc/99-amd-kfd.rules`, `misc/rocm-doctor.sh`:
+  the Ubuntu 26.04 setup and triage tooling.
 
 ## How it works
 
@@ -75,6 +119,26 @@ kernel paths a real model load would — without needing any weights.
 ## Run it yourself
 
 This is the full loop on a fresh Strix Halo machine.
+
+### 0. One-shot system setup (Ubuntu 26.04 only)
+
+A single script applies the persistent configuration the backend needs — RAM-sized
+GRUB `gttsize`/`pages_limit`, CWSR off, `modprobe.d` tuning, udev GPU-access rules,
+`render`/`video` group membership, and the `tuned accelerator-performance` profile.
+It **requires Ubuntu 26.04** (the kernel ships the Strix Halo KFD fixes); other
+distros need Linux 6.18.4+ and must apply the settings by hand. Run it as your
+normal user (it uses `sudo` internally), then reboot:
+
+```sh
+git clone https://github.com/julianmb/ds4fa.git ds4-strix-halo
+cd ds4-strix-halo
+bash misc/strix-halo-ubuntu26-setup.sh     # configures GRUB/udev/tuned; reboot after
+# copy the udev rules manually if you skipped the script:
+sudo cp misc/99-amd-kfd.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The script sizes the GTT aperture to ~90% of visible RAM, so the same command works
+on both 31 GiB and 124 GiB boxes. `rocm-doctor` re-checks every item it sets.
 
 ### 1. Install the toolchain
 
@@ -189,14 +253,22 @@ properties directly, which do not depend on `amd-smi`.
 
 ## Device permissions
 
-Ensure your user can access the ROCm devices:
+The one-shot setup script installs `misc/99-amd-kfd.rules` and adds you to the
+`render`/`video` groups, so most users need do nothing by hand. Verify:
 
 ```sh
-ls -l /dev/kfd /dev/dri/render*     # should be readable/writable by your user
-groups                              # should include 'render' and/or 'video'
+ls -l /dev/kfd /dev/dri/render*     # readable/writable by group 'render'
+groups                              # should include 'render' and 'video'
+make rocm-doctor                   # step 1 + 4 re-check permissions, udev, groups
 ```
 
-Add your user to the `render` and `video` groups if needed, then re-login.
+If you skipped the script, apply the rules manually:
+
+```sh
+sudo cp misc/99-amd-kfd.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG render,video "$USER"   # then log out/in
+```
 
 ## Building
 
