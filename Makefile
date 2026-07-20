@@ -47,7 +47,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick ci
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-doctor ci
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -163,6 +163,10 @@ tests/rocm_bench_quick: tests/rocm_bench_quick.o ds4_rocm.o ds4_rocm_compat.o ds
 # kernel path actually executes (not just malloc).
 rocm-bench-quick: tests/rocm_bench_quick
 	./tests/rocm_bench_quick
+
+# One-screen triage: permissions, gfx1151, TTM/GTT, amd-ttm, profile, bench.
+rocm-doctor: tests/rocm_smoke tests/rocm_bench_quick
+	sh misc/rocm-doctor.sh
 
 # Fork CI: strict smoke test + upstream divergence policy check.
 ci: tests/rocm_smoke tests/rocm_bench_quick

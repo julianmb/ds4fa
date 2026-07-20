@@ -30,10 +30,32 @@ static int g_failed = 0;
     } \
 } while (0)
 
+static int g_leak_failed = 0;
+
 static void *alloc_page_aligned(uint64_t bytes) {
     void *p = NULL;
     if (posix_memalign(&p, 4096, (size_t)bytes) != 0) return NULL;
     return p;
+}
+
+/* Use the public ds4_gpu accessor to read HIP free memory; this catches
+ * accidental leaks across the alloc/free cycles exercised by the smoke test. */
+static void check_no_leak(size_t free_before) {
+    if (!ds4_gpu_synchronize()) {
+        fprintf(stderr, "rocm-smoke: FAIL: pre-leak-check sync failed\n");
+        g_leak_failed = 1;
+        return;
+    }
+    const size_t free_after = ds4_gpu_hip_free_bytes();
+    /* Allow a small delta for caching, but flag a 16+ MiB drop. */
+    const long long delta = (long long)free_after - (long long)free_before;
+    fprintf(stderr, "rocm-smoke: HIP free before=%zu MiB after=%zu MiB (delta=%lld MiB)\n",
+            free_before / (1024 * 1024), free_after / (1024 * 1024), delta / (1024 * 1024));
+    if (delta < -(16LL * 1024LL * 1024LL)) {
+        fprintf(stderr, "rocm-smoke: FAIL: HIP free memory dropped by %lld MiB; "
+                "possible leak.\n", -delta / (1024 * 1024));
+        g_leak_failed = 1;
+    }
 }
 
 /* Map a real GGUF file for the optional real-model smoke path. Returns the base
@@ -55,6 +77,9 @@ int main(void) {
     void *host_model = NULL;
     int ok = ds4_gpu_init();
     CHECK(ok, "ds4_gpu_init");
+
+    /* Capture HIP-visible free memory for the leak check after cleanup. */
+    const size_t free_before = ds4_gpu_hip_free_bytes();
 
     /* Device tensor: allocate, write, fill, copy, synchronize, read. */
     ds4_gpu_tensor *a = ds4_gpu_tensor_alloc(1024 * sizeof(float));
@@ -119,6 +144,11 @@ int main(void) {
         }
     }
 
+    /* Leak check: HIP free memory should be within a small delta of the
+     * initial value after all our alloc/free cycles (including the optional
+     * real-model path). */
+    check_no_leak(free_before);
+
 cleanup:
     /* Cleanup unregisters the host mapping; free the host range only after. */
     ds4_gpu_cleanup();
@@ -137,7 +167,7 @@ cleanup:
         }
     }
 
-    if (g_failed) {
+    if (g_failed || g_leak_failed) {
         fprintf(stderr, "rocm-smoke: FAILED\n");
         return 1;
     }

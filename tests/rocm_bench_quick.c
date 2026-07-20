@@ -73,6 +73,22 @@ int main(void) {
         g_failed = 1;
     }
 
+    /* Managed-tensor round-trip: alloc managed, fill, read back. Catches a
+     * broken managed-memory path that the device-alloc path would miss. */
+    {
+        const uint64_t m_elems = 16 * 1024 * 1024; /* 64 MiB f32 */
+        ds4_gpu_tensor *m = ds4_gpu_tensor_alloc_managed(m_elems * sizeof(float));
+        CHECK(m, "managed alloc");
+        CHECK(ds4_gpu_tensor_fill_f32(m, 7.0f, m_elems), "managed fill");
+        CHECK(ds4_gpu_synchronize(), "managed sync");
+        float sample_managed = 0;
+        CHECK(ds4_gpu_tensor_read(m, 0, &sample_managed, sizeof(sample_managed)),
+              "managed read");
+        CHECK(sample_managed == 7.0f, "managed round-trip correctness");
+        ds4_gpu_tensor_free(m);
+        m = NULL;
+    }
+
 cleanup:
     ds4_gpu_cleanup();
     if (g_failed) {

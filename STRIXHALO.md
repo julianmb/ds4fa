@@ -151,7 +151,17 @@ You can also override the limit for a single run without changing the system:
 DS4_ROCM_TTM_PAGES=8126464 ./ds4 -m your-model.gguf
 # and to let the engine try to raise it via amd-ttm itself (run as root):
 DS4_ROCM_TTM_AUTORAISE=1 ./ds4 -m your-model.gguf
+# across multiple set_model_map calls (e.g. eval startup, server reload):
+DS4_ROCM_TTM_AUTORAISE=1 DS4_ROCM_AUTO_RAISE_ONCE=1 ./ds4 -m your-model.gguf
 ```
+
+**Priority order:** `DS4_ROCM_TTM_PAGES` > live `pages_limit` from the kernel
+(possibly raised by `amd-ttm`). The env var always wins when set, so a single
+run can use a higher limit than the rest of the system sees. `DS4_ROCM_TTM_AUTORAISE`
+is a write path (calls `amd-ttm` and changes the system-wide limit); the env
+override is a read path (per-process only, no system change). `DS4_ROCM_AUTO_RAISE_ONCE=1`
+makes the engine call `amd-ttm` at most once per process, so multiple
+`set_model_map` calls (eval startup, server reload) do not repeatedly invoke it.
 
 After raising it, the diagnostic should show the full mapped ceiling and no
 warning:

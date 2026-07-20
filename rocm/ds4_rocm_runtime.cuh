@@ -5729,6 +5729,7 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
  */
 
 #include <stdarg.h>
+#include <unistd.h>
 
 /* Count of WARNING-level diagnostics emitted this process. Used by the smoke
  * test's strict mode (ROCM_SMOKE_STRICT) to turn configuration warnings into
@@ -5736,6 +5737,24 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
 static int g_ds4_rocm_warnings = 0;
 
 int ds4_rocm_warning_count(void) { return g_ds4_rocm_warnings; }
+
+size_t ds4_gpu_hip_free_bytes(void) {
+#ifdef __HIP_PLATFORM_AMD__
+    size_t free_b = 0, total_b = 0;
+    if (hipMemGetInfo(&free_b, &total_b) == hipSuccess) return free_b;
+#endif
+    return 0;
+}
+
+/* Per-model residency estimate, populated by ds4_gpu_set_model_map. The type
+ * itself is defined in ds4_gpu.h (ds4_rocm_model_load_estimate) so the public
+ * API and the runtime agree on the layout. */
+static ds4_rocm_model_load_estimate g_ds4_rocm_last_model_estimate = {0};
+
+const ds4_rocm_model_load_estimate *
+ds4_rocm_last_model_load_estimate(void) {
+    return &g_ds4_rocm_last_model_estimate;
+}
 
 /* Read total system RAM in bytes from /proc/meminfo. Returns 0 on failure. */
 static uint64_t ds4_rocm_total_system_memory(void) {
@@ -5787,12 +5806,25 @@ static uint64_t ds4_rocm_effective_ttm_bytes(void) {
 }
 
 /* Attempt to raise the TTM/GTT limit via amd-ttm when the effective limit is
- * below the requested bytes and DS4_ROCM_TTM_AUTORAISE is set. Returns the new
- * limit in bytes (re-read after the call), or 0 if it could not be raised. */
+ * below the requested bytes and DS4_ROCM_TTM_AUTORAISE is set. Honors
+ * DS4_ROCM_AUTO_RAISE_ONCE: when set (non-0), at most one amd-ttm call is
+ * made per process (subsequent calls are no-ops, and the current limit is
+ * returned as-is). Returns the new limit in bytes (re-read after the call),
+ * or 0 if it could not be raised / was not attempted. */
 static uint64_t ds4_rocm_try_autoraise_ttm(uint64_t want_bytes) {
     const char *autoenv = getenv("DS4_ROCM_TTM_AUTORAISE");
     if (autoenv == NULL || autoenv[0] == '\0' || strcmp(autoenv, "0") == 0)
         return 0;
+    const char *onceenv = getenv("DS4_ROCM_AUTO_RAISE_ONCE");
+    static int s_already_raised = 0;
+    if (onceenv && onceenv[0] != '\0' && strcmp(onceenv, "0") != 0) {
+        if (s_already_raised) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "DS4_ROCM_AUTO_RAISE_ONCE: skipping "
+                    "another amd-ttm call (already raised this process).\n");
+            return 0;
+        }
+    }
     const char *amdttm = "/usr/bin/amd-ttm";
     struct stat st;
     if (stat(amdttm, &st) != 0) return 0;
@@ -5810,6 +5842,7 @@ static uint64_t ds4_rocm_try_autoraise_ttm(uint64_t want_bytes) {
                 "root or raise the limit manually.\n", rc);
         return 0;
     }
+    s_already_raised = 1;
     return ds4_rocm_ttm_pages_limit_bytes();
 }
 
@@ -5871,10 +5904,26 @@ static void ds4_rocm_check_model_fits_ttm(uint64_t model_bytes, uint64_t ttm_byt
 /* Optional machine-readable diagnostics. When DS4_ROCM_DIAG is set to a path,
  * the runtime profile is written there. The file is truncated (not appended) on
  * each run, and a timestamp marks the block. Set DS4_ROCM_DIAG_JSON=1 to emit
- * JSON instead of key=value lines. */
+ * JSON instead of key=value lines. DS4_ROCM_DIAG_FIELDS controls verbosity:
+ *   basic = device, arch, versions, TTM limit
+ *   full  = + memory flags, HIP-visible memory, system RAM (default)
+ *   all   = + gguf magic, cmdline gttsize, model-fit estimate
+ */
 static int ds4_rocm_diag_json(void) {
     const char *env = getenv("DS4_ROCM_DIAG_JSON");
     return env && env[0] != '\0' && strcmp(env, "0") != 0;
+}
+
+static int ds4_rocm_diag_level(void) {
+    const char *env = getenv("DS4_ROCM_DIAG_FIELDS");
+    if (env == NULL || env[0] == '\0' || strcmp(env, "full") == 0) return 1; /* full */
+    if (strcmp(env, "basic") == 0) return 0;
+    if (strcmp(env, "all") == 0) return 2;
+    return 1; /* unknown -> default to full */
+}
+
+static int ds4_rocm_diag_include(int min_level) {
+    return ds4_rocm_diag_level() >= min_level;
 }
 
 static FILE *ds4_rocm_diag_open(void) {
@@ -5899,6 +5948,26 @@ static FILE *ds4_rocm_diag_open(void) {
         }
     }
     return f;
+}
+
+/* Emit a diag key/value. min_level: 0=basic, 1=full (default), 2=all. */
+static void ds4_rocm_diag_kv_lvl(FILE *f, int min_level, const char *key, const char *fmt, ...) {
+    if (!f) return;
+    if (!ds4_rocm_diag_include(min_level)) return;
+    va_list ap;
+    va_start(ap, fmt);
+    if (ds4_rocm_diag_json()) {
+        static int s_first = 1;
+        fprintf(f, "%s  \"%s\": \"", s_first ? "\n" : ",\n", key);
+        vfprintf(f, fmt, ap);
+        fprintf(f, "\"");
+        s_first = 0;
+    } else {
+        fprintf(f, "%s=", key);
+        vfprintf(f, fmt, ap);
+        fprintf(f, "\n");
+    }
+    va_end(ap);
 }
 
 static void ds4_rocm_diag_kv(FILE *f, const char *key, const char *fmt, ...) {
@@ -5959,6 +6028,105 @@ static uint64_t ds4_rocm_cmdline_gttsize_mib(void) {
     }
     fclose(f);
     return mib;
+}
+
+/* Detect the "amdgpu.gttsize=0" / "no GTT special" case: the driver default
+ * (no boot parameter override) is usually a small fraction of RAM. We treat
+ * the *absence* of amdgpu.gttsize as the driver-default case, and a literal
+ * "0" as "explicitly disabled". */
+static int ds4_rocm_cmdline_has_gttsize_param(void) {
+    FILE *f = fopen("/proc/cmdline", "r");
+    if (!f) return 0;
+    char line[2048];
+    int found = 0;
+    if (fgets(line, sizeof(line), f)) found = strstr(line, "amdgpu.gttsize=") != NULL;
+    fclose(f);
+    return found;
+}
+
+/* Minimal GGUF header peek. Reads magic + tensor_count (GGUF v3 layout) and
+ * returns 0 on success, -1 on a non-GGUF or truncated file. */
+static int ds4_rocm_peek_gguf_header(int fd, char magic[8], uint64_t *tensor_count) {
+    magic[0] = '\0';
+    *tensor_count = 0;
+    if (lseek(fd, 0, SEEK_SET) < 0) return -1;
+    unsigned char hdr[24] = {0};
+    ssize_t got = read(fd, hdr, sizeof(hdr));
+    if (got < 8) return -1;
+    if (memcmp(hdr, "GGUF", 4) != 0) return -1;
+    /* magic + version(uint32) + tensor_count(uint64) + kv_count(uint64) */
+    memcpy(magic, hdr, 4);
+    magic[4] = '\0';
+    /* Read tensor_count (offset 8, uint64 LE). */
+    if (got >= 16) {
+        uint64_t tc = 0;
+        for (int i = 0; i < 8; i++) tc |= ((uint64_t)hdr[8 + i]) << (i * 8);
+        *tensor_count = tc;
+    }
+    return 0;
+}
+
+/* Estimate whether `model_bytes` will fit in the TTM/GTT limit, populating
+ * `g_ds4_rocm_last_model_estimate` as a side effect. */
+static void ds4_rocm_record_model_estimate(const void *model_map, uint64_t model_bytes) {
+    g_ds4_rocm_last_model_estimate.model_bytes = model_bytes;
+    g_ds4_rocm_last_model_estimate.gguf_magic[0] = '\0';
+    g_ds4_rocm_last_model_estimate.gguf_tensor_count = 0;
+
+    /* Try to peek a GGUF header. We don't need to be authoritative: the file
+     * size is the real residency signal, but a magic + tensor count is useful
+     * context in the diagnostic. */
+    const char *path = NULL;
+    /* The model map may be an mmap of a file we don't know the path of, so we
+     * best-effort: try /proc/self/maps to find the backing path. */
+    char buf[4096];
+    buf[0] = '\0';
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (maps) {
+        uintptr_t want = (uintptr_t)model_map;
+        while (fgets(buf, sizeof(buf), maps)) {
+            uintptr_t lo = 0, hi = 0;
+            char perms[8] = {0};
+            char path_buf[1024] = {0};
+            if (sscanf(buf, "%lx-%lx %7s %*x %*s %*u %1023s",
+                       (unsigned long *)&lo, (unsigned long *)&hi, perms, path_buf) >= 3) {
+                if (want >= lo && want < hi && path_buf[0] == '/') {
+                    path = strdup(path_buf);
+                    break;
+                }
+            }
+        }
+        fclose(maps);
+    }
+    if (path) {
+        int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            (void)ds4_rocm_peek_gguf_header(fd, g_ds4_rocm_last_model_estimate.gguf_magic,
+                                            &g_ds4_rocm_last_model_estimate.gguf_tensor_count);
+            close(fd);
+        }
+        free((void *)path);
+    }
+
+    const uint64_t ttm = ds4_rocm_effective_ttm_bytes();
+    g_ds4_rocm_last_model_estimate.ttm_limit_bytes = ttm;
+    if (ttm == 0) {
+        g_ds4_rocm_last_model_estimate.headroom_bytes = 0;
+        g_ds4_rocm_last_model_estimate.would_have_oomed = 0;
+        g_ds4_rocm_last_model_estimate.headroom_below_8g = 0;
+        return;
+    }
+    if (model_bytes > ttm) {
+        g_ds4_rocm_last_model_estimate.headroom_bytes = 0;
+        g_ds4_rocm_last_model_estimate.would_have_oomed = 1;
+        g_ds4_rocm_last_model_estimate.headroom_below_8g = 1;
+    } else {
+        const uint64_t reserved = 8ull * 1073741824ull;
+        const uint64_t headroom = ttm - model_bytes;
+        g_ds4_rocm_last_model_estimate.headroom_bytes = headroom;
+        g_ds4_rocm_last_model_estimate.would_have_oomed = 0;
+        g_ds4_rocm_last_model_estimate.headroom_below_8g = headroom < reserved;
+    }
 }
 
 static void ds4_rocm_print_profile(void) {
@@ -6043,7 +6211,14 @@ static void ds4_rocm_print_profile(void) {
                 (ttm_kernel > 0 && ttm_env != ttm_kernel) ? " (DS4_ROCM_TTM_PAGES override)" : "");
         ds4_rocm_check_ttm_limit(total_ram, ttm_env);
         const uint64_t gtt_mib = ds4_rocm_cmdline_gttsize_mib();
-        if (gtt_mib > 0) {
+        const int has_gttsize = ds4_rocm_cmdline_has_gttsize_param();
+        if (!has_gttsize) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "NOTE: no amdgpu.gttsize boot parameter "
+                    "is set; the driver is choosing a default GTT limit. If "
+                    "the default is too small, set amdgpu.gttsize=<MiB> in "
+                    "GRUB, or raise the limit at runtime with amd-ttm.\n");
+        } else if (gtt_mib > 0) {
             const uint64_t gtt_bytes = gtt_mib * 1048576ull;
             if (ttm_env + 1073741824ull < gtt_bytes) {
                 fprintf(stderr,
@@ -6065,26 +6240,35 @@ static void ds4_rocm_print_profile(void) {
 
     FILE *diag = ds4_rocm_diag_open();
     if (diag) {
-        ds4_rocm_diag_kv(diag, "ds4_rocm_device", "%s", prop.name);
-        ds4_rocm_diag_kv(diag, "ds4_rocm_gcn_arch", "%s", prop.gcnArchName);
-        ds4_rocm_diag_kv(diag, "ds4_rocm_build", "%s",
-                         ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)));
-        ds4_rocm_diag_kv(diag, "ds4_rocm_runtime", "%s",
-                         ds4_rocm_format_version(runtime_version, runtime_ver, sizeof(runtime_ver)));
-        ds4_rocm_diag_kv(diag, "ds4_rocm_driver", "%s",
-                         ds4_rocm_format_version(driver_version, driver_ver, sizeof(driver_ver)));
-        ds4_rocm_diag_kv(diag, "ds4_rocm_managed_memory", "%d", managed);
-        ds4_rocm_diag_kv(diag, "ds4_rocm_concurrent_managed", "%d", concurrent_managed);
-        ds4_rocm_diag_kv(diag, "ds4_rocm_pageable_access", "%d", pageable);
+        ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_device", "%s", prop.name);
+        ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_gcn_arch", "%s", prop.gcnArchName);
+        ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_build", "%s",
+                             ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)));
+        ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_runtime", "%s",
+                             ds4_rocm_format_version(runtime_version, runtime_ver, sizeof(runtime_ver)));
+        ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_driver", "%s",
+                             ds4_rocm_format_version(driver_version, driver_ver, sizeof(driver_ver)));
+        ds4_rocm_diag_kv_lvl(diag, 1, "ds4_rocm_managed_memory", "%d", managed);
+        ds4_rocm_diag_kv_lvl(diag, 1, "ds4_rocm_concurrent_managed", "%d", concurrent_managed);
+        ds4_rocm_diag_kv_lvl(diag, 1, "ds4_rocm_pageable_access", "%d", pageable);
         if (total_b)
-            ds4_rocm_diag_kv(diag, "ds4_rocm_hip_visible_bytes", "%llu", (unsigned long long)total_b);
+            ds4_rocm_diag_kv_lvl(diag, 1, "ds4_rocm_hip_visible_bytes", "%llu", (unsigned long long)total_b);
         if (total_ram)
-            ds4_rocm_diag_kv(diag, "ds4_rocm_system_ram_bytes", "%llu", (unsigned long long)total_ram);
+            ds4_rocm_diag_kv_lvl(diag, 1, "ds4_rocm_system_ram_bytes", "%llu", (unsigned long long)total_ram);
         if (ttm_env)
-            ds4_rocm_diag_kv(diag, "ds4_rocm_ttm_limit_bytes", "%llu", (unsigned long long)ttm_env);
+            ds4_rocm_diag_kv_lvl(diag, 0, "ds4_rocm_ttm_limit_bytes", "%llu", (unsigned long long)ttm_env);
         const uint64_t gtt_mib = ds4_rocm_cmdline_gttsize_mib();
         if (gtt_mib)
-            ds4_rocm_diag_kv(diag, "ds4_rocm_cmdline_gttsize_mib", "%llu", (unsigned long long)gtt_mib);
+            ds4_rocm_diag_kv_lvl(diag, 2, "ds4_rocm_cmdline_gttsize_mib", "%llu", (unsigned long long)gtt_mib);
+        if (g_ds4_rocm_last_model_estimate.model_bytes)
+            ds4_rocm_diag_kv_lvl(diag, 2, "ds4_rocm_model_bytes", "%llu",
+                                 (unsigned long long)g_ds4_rocm_last_model_estimate.model_bytes);
+        if (g_ds4_rocm_last_model_estimate.gguf_magic[0])
+            ds4_rocm_diag_kv_lvl(diag, 2, "ds4_rocm_gguf_magic", "%s",
+                                 g_ds4_rocm_last_model_estimate.gguf_magic);
+        if (g_ds4_rocm_last_model_estimate.gguf_tensor_count)
+            ds4_rocm_diag_kv_lvl(diag, 2, "ds4_rocm_gguf_tensor_count", "%llu",
+                                 (unsigned long long)g_ds4_rocm_last_model_estimate.gguf_tensor_count);
         ds4_rocm_diag_close(diag);
     }
 #else
@@ -6412,6 +6596,8 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
         }
     }
     if (ttm_bytes > 0) ds4_rocm_check_model_fits_ttm(model_size, ttm_bytes);
+    /* Record the per-model residency verdict for tooling (smoke, doctor). */
+    ds4_rocm_record_model_estimate(model_map, model_size);
 #else
     (void)ds4_rocm_check_model_fits_ttm;
 #endif

@@ -214,6 +214,26 @@ void ds4_gpu_print_memory_report(const char *label);
  * builds. */
 int ds4_rocm_warning_count(void);
 
+/* Per-model residency verdict, populated by ds4_gpu_set_model_map. Tooling
+ * can query it to warn about near-OOM loads without re-reading the kernel.
+ * Always defined; returns zeros on non-ROCm builds or before any model map. */
+typedef struct ds4_rocm_model_load_estimate {
+    uint64_t model_bytes;
+    uint64_t ttm_limit_bytes;
+    uint64_t headroom_bytes;     /* ttm_limit - model_bytes, 0 if would OOM */
+    int      would_have_oomed;
+    int      headroom_below_8g;
+    char     gguf_magic[8];
+    uint64_t gguf_tensor_count;
+} ds4_rocm_model_load_estimate;
+
+const ds4_rocm_model_load_estimate *ds4_rocm_last_model_load_estimate(void);
+
+/* HIP-visible free memory in bytes, via hipMemGetInfo. Returns 0 on non-ROCm
+ * builds or when the device is not initialized. Used by the smoke test to
+ * detect accidental device-memory leaks across alloc/free cycles. */
+size_t ds4_gpu_hip_free_bytes(void);
+
 /* Tensor-parallel per-layer gates (Metal only).  The encoder calls
  * ds4_gpu_tp_gate_encode() right after the kernels that produce a partial
  * block output in the TP slab: it closes the current encoder, makes the GPU

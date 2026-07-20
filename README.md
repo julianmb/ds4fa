@@ -211,25 +211,33 @@ for `gfx1151`.
 
 ## Tests and CI
 
-The `make rocm-smoke`, `make rocm-diag`, `make rocm-bench-quick`, and `make ci`
-targets are documented in the **Run it yourself** section above. In short:
-`rocm-smoke` exercises allocation/copy/mapping (and a real model when
-`DS4_TEST_MODEL` is set); `rocm-diag` prints only the profile; `rocm-bench-quick`
-confirms gfx1151 kernels execute and reports bandwidth; `ci` runs the strict
-smoke test, the quick bench, and `misc/sync-check.sh`. Set `DS4_ROCM_DIAG=FILE`
-on any run to also write a machine-readable `key=value` (or JSON with
-`DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
+The `make rocm-smoke`, `make rocm-diag`, `make rocm-bench-quick`, `make rocm-doctor`,
+and `make ci` targets are documented in the **Run it yourself** section above. In
+short: `rocm-smoke` exercises allocation/copy/mapping (and a real model when
+`DS4_TEST_MODEL` is set) and now also checks for device-memory leaks across the
+alloc/free cycles; `rocm-diag` prints only the profile; `rocm-bench-quick` runs a
+fill+copy + a managed-tensor round-trip on gfx1151 and reports bandwidth;
+`rocm-doctor` is a one-screen triage for "is this box set up correctly?";
+`ci` runs the strict smoke test, the quick bench, and `misc/sync-check.sh`. Set
+`DS4_ROCM_DIAG=FILE` on any run to also write a machine-readable `key=value`
+(or JSON with `DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
 
 ## Environment variables (ROCm / Strix Halo)
 
 - `DS4_ROCM_TTM_PAGES` — override the TTM/GTT mapping limit in 4 KiB pages
-  (e.g. `8126464` ≈ 31 GiB). Useful without changing the system.
+  (e.g. `8126464` ≈ 31 GiB). Useful without changing the system. Highest
+  priority: beats the live `pages_limit`.
 - `DS4_ROCM_TTM_AUTORAISE` — if set (non-`0`), the engine attempts to raise the
   limit via `amd-ttm --set-pages` when a model would not fit. Requires root.
+- `DS4_ROCM_AUTO_RAISE_ONCE` — pair with `AUTORAISE` so `amd-ttm` is invoked at
+  most once per process (avoids repeated calls on eval startup / server reload).
 - `DS4_ROCM_DIAG` — path to a file where the startup profile is written (truncated
   each run) as `key=value` lines.
 - `DS4_ROCM_DIAG_JSON` — if set (non-`0`), `DS4_ROCM_DIAG` is written as JSON
   instead of `key=value`.
+- `DS4_ROCM_DIAG_FIELDS` — `basic` | `full` (default) | `all`. `basic` = device,
+  arch, versions, TTM limit. `full` = + memory flags, HIP-visible memory,
+  system RAM. `all` = + GGUF header, cmdline `gttsize`, model-fit estimate.
 - `DS4_TEST_MODEL` — when set for `make rocm-smoke`, the smoke test additionally
   maps and caches the given GGUF, acting as a "can I load a model" gate.
 - `ROCM_SMOKE_STRICT` — if set (non-`0`), `make rocm-smoke` / `make ci` fails when
