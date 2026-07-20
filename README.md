@@ -38,6 +38,126 @@ decoding) is upstream DS4 and is documented upstream.
   page-aligned host model range mapping, model-range caching, and ordered
   cleanup).
 
+## How it works
+
+Strix Halo is a unified-memory part: the CPU and GPU share one physical RAM
+pool, and the GPU reaches that memory through a **TTM/GTT** mapping limit rather
+than a fixed VRAM allocation. The single biggest source of "it won't load my
+model" or "it OOMs" problems on this hardware is a GTT limit that is too small
+relative to RAM — usually caused by an oversized BIOS dedicated-VRAM carveout.
+
+This fork does **not** change how DS4 runs models. It adds a small, ROCm-only
+diagnostics layer that runs at startup (`ds4_gpu_init`) and answers three
+questions:
+
+1. **Is this the right hardware/driver?** It prints `gcnArchName` (must be
+   `gfx1151`), the HIP/ROCm build/runtime/driver versions (baseline 7.2.3), and
+   the memory capabilities (managed, concurrent-managed, pageable access).
+2. **Is there enough mapped memory?** It reads the TTM/GTT `pages_limit` from
+   `/sys/module/{ttm,amdttm,amd_ttm}/parameters/pages_limit`, compares it to
+   total system RAM, and warns when it is below 75%. It also warns when a loaded
+   model would leave less than ~8 GiB of that limit for runtime state, and it
+   cross-checks the `amdgpu.gttsize` boot parameter against the live limit so a
+   boot param that "didn't take" is visible.
+3. **What is the exact fix?** Instead of only warning, it prints the precise
+   `sudo amd-ttm --set-pages N` command that raises the limit to ~90% of RAM.
+
+The diagnostics are **advisory**: they print to stderr and (optionally, via
+`DS4_ROCM_DIAG`) to a file. They never alter how inference executes. Two escape
+hatches let you act on them: `DS4_ROCM_TTM_PAGES` overrides the limit for a
+single run, and `DS4_ROCM_TTM_AUTORAISE=1` lets the engine call `amd-ttm`
+itself (as root) when a model wouldn't fit.
+
+The smoke/bench tests are ordinary C programs that link the `ds4_gpu` API the
+engine itself uses, so they exercise the *same* allocation, copy, mapping, and
+kernel paths a real model load would — without needing any weights.
+
+## Run it yourself
+
+This is the full loop on a fresh Strix Halo machine.
+
+### 1. Install the toolchain
+
+On Ubuntu 26.04 (which already has the Strix Halo KFD fixes):
+
+```sh
+sudo apt-get update
+sudo apt-get install -y \
+  hipcc rocminfo rocm-smi libamdhip64-dev \
+  libhipblas-dev libhipblaslt-dev librocblas-dev \
+  librocwmma-dev libhipcub-dev
+# rocWMMA is missing its internal headers on 26.04; add a matching tree:
+git clone --depth 1 --branch rocm-7.2.3 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA
+sudo cp -a /tmp/rocWMMA/library/include/rocwmma /usr/local/include/
+```
+
+(Other distros: use Linux 6.18.4+ or backport the KFD fixes; see
+[STRIXHALO.md](STRIXHALO.md).)
+
+### 2. Clone and build
+
+```sh
+git clone https://github.com/julianmb/ds4fa.git ds4-strix-halo
+cd ds4-strix-halo
+make strix-halo -j"$(nproc)"      # builds ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent for gfx1151
+```
+
+### 3. Check the hardware (no model needed)
+
+```sh
+make rocm-diag
+```
+
+This prints the startup profile. On a healthy machine you'll see something like
+`gcnArchName=gfx1151` and a TTM/GTT limit near your RAM size. On a misconfigured
+one you'll get a `WARNING` plus a `SUGGESTED: sudo amd-ttm --set-pages ...` line.
+
+### 4. Fix the GTT limit (if warned)
+
+```sh
+sudo amd-ttm --set-pages 8126464     # 8126464 * 4 KiB ≈ 31 GiB; pick ~90% of your RAM
+# or, for a single run without touching the system:
+DS4_ROCM_TTM_PAGES=8126464 ./ds4 -m your-model.gguf
+```
+
+Re-run `make rocm-diag` to confirm the limit rose and the warning is gone.
+
+### 5. Run the smoke and quick-bench tests
+
+```sh
+make rocm-smoke            # allocation/copy/mapping + optional real-model gate
+make rocm-bench-quick      # confirms gfx1151 kernels execute; prints bandwidth
+```
+
+Both should print `PASSED`. To make CI fail on any config warning:
+
+```sh
+ROCM_SMOKE_STRICT=1 make rocm-smoke
+```
+
+### 6. Run a model
+
+```sh
+./download_model.sh                       # or drop in your own GGUF
+./ds4-server ds4flash.gguf                # HTTP server
+# or
+./ds4 ds4flash.gguf                       # interactive CLI
+```
+
+If the model is larger than the GTT-mapped memory allows, use upstream SSD
+streaming:
+
+```sh
+./ds4 --ssd-streaming -m your-large-model.gguf
+```
+
+### 7. Capture a report for help/CI
+
+```sh
+DS4_ROCM_DIAG=./diag.txt DS4_ROCM_DIAG_JSON=1 ./ds4 -m ds4flash.gguf
+cat ./diag.txt          # machine-readable profile (JSON), attach to issues
+```
+
 ## Tested hardware and ROCm baseline
 
 - AMD Strix Halo (`gfx1151`), e.g. Framework Desktop / Ryzen AI MAX+.
@@ -89,22 +209,14 @@ make strix-halo -j"$(nproc)"     # or: make rocm
 This builds `ds4`, `ds4-server`, `ds4-bench`, `ds4-eval`, and `ds4-agent`
 for `gfx1151`.
 
-## Running the smoke test
+## Tests and CI
 
-```sh
-make rocm-smoke
-```
-
-It initializes the ROCm backend, exercises device allocation/copy/managed
-tensors, maps a page-aligned host model range, caches a model range, and checks
-cleanup ordering. On a healthy machine it prints `rocm-smoke: PASSED` and a
-runtime profile. On a misconfigured machine it also prints actionable
-warnings (e.g. a low TTM/GTT limit).
-
-You can also run `make rocm-diag` to print only the runtime profile (no model
-needed), `make rocm-bench-quick` to confirm compute kernels actually execute on
-gfx1151 and report bandwidth, or `make ci` to run the strict smoke test, the
-quick bench, and the upstream-divergence policy check. Set `DS4_ROCM_DIAG=FILE`
+The `make rocm-smoke`, `make rocm-diag`, `make rocm-bench-quick`, and `make ci`
+targets are documented in the **Run it yourself** section above. In short:
+`rocm-smoke` exercises allocation/copy/mapping (and a real model when
+`DS4_TEST_MODEL` is set); `rocm-diag` prints only the profile; `rocm-bench-quick`
+confirms gfx1151 kernels execute and reports bandwidth; `ci` runs the strict
+smoke test, the quick bench, and `misc/sync-check.sh`. Set `DS4_ROCM_DIAG=FILE`
 on any run to also write a machine-readable `key=value` (or JSON with
 `DS4_ROCM_DIAG_JSON=1`) summary for CI and bug reports.
 
