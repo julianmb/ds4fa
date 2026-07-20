@@ -1,0 +1,12 @@
+# AMD Strix Halo (gfx1151) GPU access rules for the ds4 ROCm backend.
+#
+# Install on Ubuntu 26.04:
+#   sudo cp 99-amd-kfd.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# Lets members of the 'render' group open the KFD and DRM render nodes so the
+# ROCm/HIP runtime (and the ds4 rocm-* diagnostics) work without root.
+SUBSYSTEM=="kfd", GROUP="render", MODE="0666"
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", GROUP="render", MODE="0666"
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", GROUP="render", MODE="0666"

@@ -30,7 +30,10 @@
 *.dSYM/
 __pycache__/
 *.pyc
-/misc/
+# AI-session artifacts that are not part of the fork.
+misc/ANTHROPIC_LIVE_CONTINUATION.md
+misc/COMPACT.md
+misc/RESPONSE_API.md
 .*.swp
 .DS_Store
 /tests/rocm_smoke
