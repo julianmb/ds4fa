@@ -101,6 +101,21 @@ cleanup ordering. On a healthy machine it prints `rocm-smoke: PASSED` and a
 runtime profile. On a misconfigured machine it also prints actionable
 warnings (e.g. a low TTM/GTT limit).
 
+You can also run `make rocm-diag` to print only the runtime profile (no model
+needed), or set `DS4_ROCM_DIAG=FILE` on any run to also append a machine-readable
+`key=value` summary for CI and bug reports.
+
+## Environment variables (ROCm / Strix Halo)
+
+- `DS4_ROCM_TTM_PAGES` — override the TTM/GTT mapping limit in 4 KiB pages
+  (e.g. `8126464` ≈ 31 GiB). Useful without changing the system.
+- `DS4_ROCM_TTM_AUTORAISE` — if set (non-`0`), the engine attempts to raise the
+  limit via `amd-ttm --set-pages` when a model would not fit. Requires root.
+- `DS4_ROCM_DIAG` — path to a file where the startup profile is appended as
+  `key=value` lines.
+- `DS4_TEST_MODEL` — when set for `make rocm-smoke`, the smoke test additionally
+  maps and caches the given GGUF, acting as a "can I load a model" gate.
+
 ## Running a model
 
 Download a supported GGUF (DeepSeek V4 Flash, GLM 5.2, or a smaller model) and

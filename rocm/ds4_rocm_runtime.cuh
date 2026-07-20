@@ -5728,6 +5728,8 @@ static int cublas_ok(cublasStatus_t st, const char *what) {
  * layer.
  */
 
+#include <stdarg.h>
+
 /* Read total system RAM in bytes from /proc/meminfo. Returns 0 on failure. */
 static uint64_t ds4_rocm_total_system_memory(void) {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -5743,7 +5745,8 @@ static uint64_t ds4_rocm_total_system_memory(void) {
 
 /* Read the TTM/GTT pages_limit from the relevant module parameter and return
  * the mapped byte limit, or 0 if it cannot be determined. Module names differ
- * across ROCm/KFD versions: ttm, amdttm, and amd_ttm. */
+ * across ROCm/KFD versions: ttm, amdttm, and amd_ttm. pages_limit is expressed
+ * in 4 KiB pages. */
 static uint64_t ds4_rocm_ttm_pages_limit_bytes(void) {
     static const char *const paths[] = {
         "/sys/module/ttm/parameters/pages_limit",
@@ -5757,12 +5760,50 @@ static uint64_t ds4_rocm_ttm_pages_limit_bytes(void) {
         long long pages = -1;
         if (fscanf(f, "%lld", &pages) == 1 && pages > 0) {
             fclose(f);
-            /* pages_limit is expressed in 4 KiB pages. */
             return (uint64_t)pages * 4096ull;
         }
         fclose(f);
     }
     return 0;
+}
+
+/* Resolve the TTM/GTT byte limit. DS4_ROCM_TTM_PAGES overrides the kernel
+ * value (4 KiB pages). Returns 0 if neither is available. */
+static uint64_t ds4_rocm_effective_ttm_bytes(void) {
+    const char *env = getenv("DS4_ROCM_TTM_PAGES");
+    if (env && env[0] != '\0') {
+        char *end = NULL;
+        long long pages = strtoll(env, &end, 10);
+        if (end != env && pages > 0) return (uint64_t)pages * 4096ull;
+    }
+    return ds4_rocm_ttm_pages_limit_bytes();
+}
+
+/* Attempt to raise the TTM/GTT limit via amd-ttm when the effective limit is
+ * below the requested bytes and DS4_ROCM_TTM_AUTORAISE is set. Returns the new
+ * limit in bytes (re-read after the call), or 0 if it could not be raised. */
+static uint64_t ds4_rocm_try_autoraise_ttm(uint64_t want_bytes) {
+    const char *autoenv = getenv("DS4_ROCM_TTM_AUTORAISE");
+    if (autoenv == NULL || autoenv[0] == '\0' || strcmp(autoenv, "0") == 0)
+        return 0;
+    const char *amdttm = "/usr/bin/amd-ttm";
+    struct stat st;
+    if (stat(amdttm, &st) != 0) return 0;
+    const uint64_t pages = (want_bytes + 4095ull) / 4096ull;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "%s --set-pages %llu",
+             amdttm, (unsigned long long)pages);
+    fprintf(stderr,
+            DS4_GPU_LOG_PREFIX "attempting to raise TTM/GTT limit via amd-ttm "
+            "(%llu pages)...\n", (unsigned long long)pages);
+    const int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "amd-ttm --set-pages failed (rc=%d). Re-run as "
+                "root or raise the limit manually.\n", rc);
+        return 0;
+    }
+    return ds4_rocm_ttm_pages_limit_bytes();
 }
 
 /* Format a HIP version packed as (major*100 + minor)*100 + patch into a string
@@ -5806,6 +5847,45 @@ static void ds4_rocm_check_model_fits_ttm(uint64_t model_bytes, uint64_t ttm_byt
                 (double)model_bytes / 1073741824.0,
                 (double)(ttm_bytes > model_bytes ? ttm_bytes - model_bytes : 0) / 1073741824.0,
                 (double)ttm_bytes / 1073741824.0);
+    }
+}
+
+/* Optional machine-readable diagnostics. When DS4_ROCM_DIAG is set to a path,
+ * the runtime profile is also appended there as key=value lines for CI and
+ * bug reports. */
+static FILE *ds4_rocm_diag_open(void) {
+    const char *path = getenv("DS4_ROCM_DIAG");
+    if (path == NULL || path[0] == '\0') return NULL;
+    FILE *f = fopen(path, "a");
+    if (!f) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "could not open DS4_ROCM_DIAG=%s: %s\n",
+                path, strerror(errno));
+    }
+    return f;
+}
+
+static void ds4_rocm_diag_kv(FILE *f, const char *key, const char *fmt, ...) {
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(f, "%s=", key);
+    vfprintf(f, fmt, ap);
+    fprintf(f, "\n");
+    va_end(ap);
+}
+
+/* Probe amd-smi / rocm-smi availability. On headless Strix Halo boxes these may
+ * be missing or return limited data; note it so users don't blame the engine. */
+static void ds4_rocm_probe_smi(void) {
+    struct stat st;
+    int have_amd_smi = (stat("/usr/bin/amd-smi", &st) == 0);
+    int have_rocm_smi = (stat("/usr/bin/rocm-smi", &st) == 0);
+    if (!have_amd_smi && !have_rocm_smi) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "note: amd-smi/rocm-smi not found; GPU "
+                "telemetry is unavailable (engine is unaffected). Install the "
+                "rocm-smi package for utilization/power readings.\n");
     }
 }
 
@@ -5857,6 +5937,15 @@ static void ds4_rocm_print_profile(void) {
     fprintf(stderr,
             DS4_GPU_LOG_PREFIX "managed-memory=%d concurrent-managed=%d "
             "pageable-access=%d\n", managed, concurrent_managed, pageable);
+    if (pageable == 0) {
+        fprintf(stderr,
+                DS4_GPU_LOG_PREFIX "NOTE: pageable-memory access is disabled. "
+                "The managed-KV-cache demand-paging path assumes pageable access "
+                "for good throughput; without it, large KV caches may be slower "
+                "or use more device memory.\n");
+    }
+
+    ds4_rocm_probe_smi();
 
     size_t free_b = 0, total_b = 0;
     if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess) {
@@ -5866,25 +5955,50 @@ static void ds4_rocm_print_profile(void) {
     }
 
     const uint64_t total_ram = ds4_rocm_total_system_memory();
-    const uint64_t ttm_bytes = ds4_rocm_ttm_pages_limit_bytes();
+    const uint64_t ttm_env = ds4_rocm_effective_ttm_bytes();
+    const uint64_t ttm_kernel = ds4_rocm_ttm_pages_limit_bytes();
     if (total_ram > 0) {
         fprintf(stderr,
                 DS4_GPU_LOG_PREFIX "system memory: %.1f GiB total\n",
                 (double)total_ram / 1073741824.0);
     }
-    if (ttm_bytes > 0) {
+    if (ttm_env > 0) {
         fprintf(stderr,
-                DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: %.1f GiB\n",
-                (double)ttm_bytes / 1073741824.0);
-        ds4_rocm_check_ttm_limit(total_ram, ttm_bytes);
+                DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: %.1f GiB%s\n",
+                (double)ttm_env / 1073741824.0,
+                (ttm_kernel > 0 && ttm_env != ttm_kernel) ? " (DS4_ROCM_TTM_PAGES override)" : "");
+        ds4_rocm_check_ttm_limit(total_ram, ttm_env);
     } else {
         fprintf(stderr,
                 DS4_GPU_LOG_PREFIX "TTM/GTT mapping limit: unknown (could not "
                 "read ttm/amd_ttm pages_limit). A low GTT limit can OOM large "
                 "models; check amd-ttm.\n");
     }
+
+    FILE *diag = ds4_rocm_diag_open();
+    if (diag) {
+        ds4_rocm_diag_kv(diag, "ds4_rocm_device", "%s", prop.name);
+        ds4_rocm_diag_kv(diag, "ds4_rocm_gcn_arch", "%s", prop.gcnArchName);
+        ds4_rocm_diag_kv(diag, "ds4_rocm_build", "%s",
+                         ds4_rocm_format_version(HIP_VERSION, build_ver, sizeof(build_ver)));
+        ds4_rocm_diag_kv(diag, "ds4_rocm_runtime", "%s",
+                         ds4_rocm_format_version(runtime_version, runtime_ver, sizeof(runtime_ver)));
+        ds4_rocm_diag_kv(diag, "ds4_rocm_driver", "%s",
+                         ds4_rocm_format_version(driver_version, driver_ver, sizeof(driver_ver)));
+        ds4_rocm_diag_kv(diag, "ds4_rocm_managed_memory", "%d", managed);
+        ds4_rocm_diag_kv(diag, "ds4_rocm_concurrent_managed", "%d", concurrent_managed);
+        ds4_rocm_diag_kv(diag, "ds4_rocm_pageable_access", "%d", pageable);
+        if (total_b)
+            ds4_rocm_diag_kv(diag, "ds4_rocm_hip_visible_bytes", "%llu", (unsigned long long)total_b);
+        if (total_ram)
+            ds4_rocm_diag_kv(diag, "ds4_rocm_system_ram_bytes", "%llu", (unsigned long long)total_ram);
+        if (ttm_env)
+            ds4_rocm_diag_kv(diag, "ds4_rocm_ttm_limit_bytes", "%llu", (unsigned long long)ttm_env);
+        fclose(diag);
+    }
 #else
     (void)ds4_rocm_check_model_fits_ttm;
+    (void)ds4_rocm_try_autoraise_ttm;
 #endif
 }
 
@@ -6194,7 +6308,18 @@ extern "C" int ds4_gpu_set_model_map(const void *model_map, uint64_t model_size)
      * Avoid host-registering the mmap here: that would make the staged copier
      * believe the model is already device-resident. */
 #ifdef __HIP_PLATFORM_AMD__
-    const uint64_t ttm_bytes = ds4_rocm_ttm_pages_limit_bytes();
+    uint64_t ttm_bytes = ds4_rocm_effective_ttm_bytes();
+    const uint64_t reserved = 8ull * 1073741824ull;
+    if (ttm_bytes > 0 && model_size + reserved > ttm_bytes) {
+        const uint64_t want = model_size + reserved;
+        const uint64_t raised = ds4_rocm_try_autoraise_ttm(want);
+        if (raised > ttm_bytes) {
+            fprintf(stderr,
+                    DS4_GPU_LOG_PREFIX "raised TTM/GTT limit to %.1f GiB\n",
+                    (double)raised / 1073741824.0);
+            ttm_bytes = raised;
+        }
+    }
     if (ttm_bytes > 0) ds4_rocm_check_model_fits_ttm(model_size, ttm_bytes);
 #else
     (void)ds4_rocm_check_model_fits_ttm;

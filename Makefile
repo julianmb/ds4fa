@@ -146,6 +146,13 @@ tests/rocm_smoke: tests/rocm_smoke.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unava
 rocm-smoke: tests/rocm_smoke
 	./tests/rocm_smoke
 
+# Print only the Strix Halo runtime profile (no model needed). Honors
+# DS4_ROCM_DIAG to also write a machine-readable summary. The smoke test calls
+# ds4_gpu_init() which prints the profile; it PASSES without a model.
+rocm-diag: tests/rocm_smoke
+	./tests/rocm_smoke
+	@echo "rocm-diag: profile printed above (set DS4_ROCM_DIAG=FILE to capture)"
+
 ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)
 	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
 
@@ -380,6 +387,10 @@ test: ds4_test ds4_agent_test ds4-eval q4k-dot-test \
 	./tests/test_gpu_args_cli.sh
 ifneq ($(UNAME_S),Darwin)
 	./tests/test_sampling
+# Run the Strix Halo ROCm smoke test only when building the ROCm backend.
+ifeq ($(DS4_ROCM_BUILD),1)
+	$(MAKE) rocm-smoke
+endif
 endif
 
 dspark-acceptance: ds4

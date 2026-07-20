@@ -11,6 +11,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "ds4_gpu.h"
 
@@ -29,6 +33,21 @@ static int g_failed = 0;
 static void *alloc_page_aligned(uint64_t bytes) {
     void *p = NULL;
     if (posix_memalign(&p, 4096, (size_t)bytes) != 0) return NULL;
+    return p;
+}
+
+/* Map a real GGUF file for the optional real-model smoke path. Returns the base
+ * pointer and sets *size, or NULL if the file is absent/unreadable. */
+static void *map_model_file(const char *path, uint64_t *size) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+    if (st.st_size == 0) { close(fd); return NULL; }
+    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return NULL;
+    *size = (uint64_t)st.st_size;
     return p;
 }
 
@@ -80,10 +99,31 @@ int main(void) {
     CHECK(ds4_gpu_cache_model_range(host_model, model_bytes, 0, model_bytes, "smoke"),
           "cache_model_range");
 
+    /* Optional real-model path: if DS4_TEST_MODEL points at a GGUF, map it and
+     * cache a real range so the smoke test doubles as a "can I load a model"
+     * gate. The mapping is freed after ds4_gpu_cleanup(). */
+    const char *real_model = getenv("DS4_TEST_MODEL");
+    void *real_base = NULL;
+    uint64_t real_size = 0;
+    if (real_model && real_model[0] != '\0') {
+        real_base = map_model_file(real_model, &real_size);
+        if (real_base) {
+            fprintf(stderr, "rocm-smoke: mapping real model %s (%.1f MiB)\n",
+                    real_model, (double)real_size / (1024.0 * 1024.0));
+            CHECK(ds4_gpu_set_model_map(real_base, real_size), "set_model_map (real)");
+            CHECK(ds4_gpu_cache_model_range(real_base, real_size, 0, real_size, "smoke-real"),
+                  "cache_model_range (real)");
+        } else {
+            fprintf(stderr, "rocm-smoke: DS4_TEST_MODEL=%s not available, skipping real-model path\n",
+                    real_model);
+        }
+    }
+
 cleanup:
     /* Cleanup unregisters the host mapping; free the host range only after. */
     ds4_gpu_cleanup();
     if (host_model) free(host_model);
+    if (real_base) munmap(real_base, (size_t)real_size);
 
     if (g_failed) {
         fprintf(stderr, "rocm-smoke: FAILED\n");

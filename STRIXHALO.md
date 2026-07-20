@@ -124,6 +124,42 @@ rocminfo gfx1151 pool: 130023424 KB
 The `ds4-strix-halo` startup diagnostics print the TTM/GTT mapping limit and
 warn when it is below 75% of system RAM or when a model is sized too close to it.
 
+### Worked example (reference machine)
+
+On the reference Strix Halo (32 GB RAM reported to the OS after a large BIOS
+VRAM carveout), the default limit was far too low:
+
+```text
+ds4: ROCm TTM/GTT mapping limit: 15.5 GiB
+ds4: ROCm WARNING: TTM/GTT mapping limit is 50.0% of system RAM (15.5/31.0 GiB)...
+```
+
+Fix: keep the dedicated VRAM carveout at 512 MB in the BIOS, then raise the GTT
+limit. With 31 GiB of system RAM and an ~24 GiB model plus runtime buffers, a
+31 GiB GTT ceiling is appropriate:
+
+```sh
+sudo amd-ttm --set-pages 8126464     # 8126464 * 4 KiB = 31 GiB
+cat /sys/module/ttm/parameters/pages_limit
+# or, if you prefer not to grant the engine root, set it once at boot via the
+# ttm.pages_limit kernel parameter (see the fallback above).
+```
+
+You can also override the limit for a single run without changing the system:
+
+```sh
+DS4_ROCM_TTM_PAGES=8126464 ./ds4 -m your-model.gguf
+# and to let the engine try to raise it via amd-ttm itself (run as root):
+DS4_ROCM_TTM_AUTORAISE=1 ./ds4 -m your-model.gguf
+```
+
+After raising it, the diagnostic should show the full mapped ceiling and no
+warning:
+
+```text
+ds4: ROCm TTM/GTT mapping limit: 31.0 GiB
+```
+
 ## 4. Build DS4
 
 Use the normal Strix Halo target. It builds the standard binary names:
