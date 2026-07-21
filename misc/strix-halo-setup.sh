@@ -149,8 +149,37 @@ else
 fi
 
 # --- ROCm toolchain presence --------------------------------------------------
+KVER=$(uname -r)
+KMAJOR=$(echo "$KVER" | cut -d. -f1)
+KMINOR=$(echo "$KVER" | cut -d. -f2)
+if [ "$KMAJOR" -lt 6 ] || { [ "$KMAJOR" -eq 6 ] && [ "$KMINOR" -lt 18 ]; }; then
+    warn "Kernel $KVER is too old. The Strix Halo KFD fixes require kernel 6.18.4+."
+    warn "Install Ubuntu 24.04 HWE kernel or use mainline kernel PPA."
+fi
 if ! command -v hipcc &>/dev/null; then
-    warn "hipcc not found. Install the ROCm 7.2.x compiler/runtime (see STRIXHALO.md) before building."
+    info "hipcc not found. Installing ROCm 7.2.x toolchain..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq \
+      hipcc rocminfo rocm-smi libamdhip64-dev \
+      libhipblas-dev libhipblaslt-dev librocblas-dev \
+      librocwmma-dev libhipcub-dev 2>/dev/null || \
+      warn "ROCm install failed. Install manually per STRIXHALO.md."
+    if ! command -v hipcc &>/dev/null; then
+        warn "hipcc still not found after install attempt. See STRIXHALO.md."
+    else
+        log "ROCm toolchain installed: $(hipcc --version 2>&1 | head -1)"
+    fi
+else
+    log "ROCm/hipcc present: $(hipcc --version 2>&1 | head -1)"
+fi
+# Install rocWMMA internal headers if missing
+if [ ! -d /usr/local/include/rocwmma/internal ]; then
+    info "Installing rocWMMA internal headers..."
+    git clone --depth 1 --branch rocm-7.2.3 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA 2>/dev/null && \
+        sudo cp -a /tmp/rocWMMA/library/include/rocwmma /usr/local/include/ && \
+        log "rocWMMA internal headers installed." || \
+        warn "rocWMMA header install failed. Build may fail without internal headers."
+    rm -rf /tmp/rocWMMA 2>/dev/null
 fi
 
 echo ""

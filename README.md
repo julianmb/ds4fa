@@ -63,13 +63,32 @@ improvements over stock ds4 are:
 - **One-shot Ubuntu 24.04 setup.** `misc/strix-halo-setup.sh` applies the
   persistent GRUB/modprobe/udev/tuned configuration (RAM-sized, CWSR off) and
   enforces the 24.04 requirement; `misc/99-amd-kfd.rules` ships the GPU-access udev
-  rules. Upstream ds4 has no equivalent.
+  rules. Installs ROCm 7.2.x if missing.
 - **CI policy guard.** `make ci` runs the strict smoke test, the quick bench, and
   `misc/sync-check.sh` (which keeps the fork close to upstream ds4).
 
 Everything diagnostic is **advisory**: it prints to stderr and (optionally) a file,
 and never alters how inference executes. The adaptation adds no new inference path —
 it reuses upstream's ROCm backend.
+
+### What upstream ds4 has vs this fork
+
+| Feature | Upstream ds4 | This fork |
+|---------|-------------|-----------|
+| Inference backends | CUDA, Metal, ROCm | Same (unchanged) |
+| ROCm smoke test | No | `make rocm-smoke` |
+| ROCm quick-bench | No | `make rocm-bench-quick` |
+| Model fit verdict | No | `make rocm-model-fit` |
+| Hardware doctor | No | `make rocm-doctor` (10-step triage) |
+| TTM/GTT diagnostics | No | Startup profile + warnings |
+| Auto-raise TTM limit | No | `DS4_ROCM_TTM_AUTORAISE` |
+| Machine-readable diag | No | `DS4_ROCM_DIAG` (key=value/JSON) |
+| Ubuntu 24.04 setup | No | `misc/strix-halo-setup.sh` |
+| udev rules | No | `misc/99-amd-kfd.rules` |
+| CI policy guard | No | `make ci` + `misc/sync-check.sh` |
+
+The fork adds **validation and configuration tooling** around the same inference
+engine — it does not change how models run.
 
 Specific files changed vs upstream:
 
@@ -250,6 +269,38 @@ On headless Strix Halo boxes, `amd-smi` GPU utilization and some power/clock
 queries may be limited or require specific driver builds. The startup
 diagnostics in this fork read the kernel TTM/GTT limit and HIP device
 properties directly, which do not depend on `amd-smi`.
+
+## Performance tuning
+
+The one-shot setup script applies the `accelerator-performance` tuned profile.
+To verify or re-apply manually:
+
+```sh
+sudo systemctl enable --now tuned
+sudo tuned-adm profile accelerator-performance
+tuned-adm active   # should show accelerator-performance
+```
+
+Key parameters:
+- **GRUB**: `amdgpu.gttsize=<MiB> ttm.pages_limit=<4KiB-pages> ttm.page_pool_size=<4KiB-pages> amdgpu.cwsr_enable=0`
+- **modprobe.d**: `/etc/modprobe.d/amdgpu_strix_halo.conf` (same values)
+- **udev**: `/etc/udev/rules.d/99-amd-kfd.rules` (render group access)
+- **Groups**: user must be in `render` and `video` groups
+
+## Model size recommendations
+
+On a 32 GB Strix Halo system (with ~31 GiB visible after BIOS carveout):
+
+| Model class | Quant | Size | Fits? | Notes |
+|-------------|-------|------|-------|-------|
+| 7B dense | Q4_K_M | ~4 GB | Yes | Fast, good quality |
+| 13B dense | Q4_K_M | ~7 GB | Yes | Balanced speed/quality |
+| 30B MoE | Q4_K_M | ~18 GB | Yes | Best speed/quality ratio |
+| 70B dense | Q4_K_M | ~35 GB | Marginal | Needs TTM override or SSD streaming |
+| 120B MoE | UD-IQ4_XS | ~50 GB | No | Requires SSD streaming |
+
+Use `make rocm-model-fit DS4_TEST_MODEL=your.gguf` to check whether a specific
+model fits your TTM/GTT limit before loading it.
 
 ## Device permissions
 

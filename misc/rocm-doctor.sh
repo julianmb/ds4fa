@@ -30,7 +30,20 @@ else
     warn "/etc/os-release not readable; skipping OS check"
 fi
 
-note "=== 1. device permissions ==="
+note "=== 1. kernel version ==="
+KVER=$(uname -r)
+KMAJOR=$(echo "$KVER" | cut -d. -f1)
+KMINOR=$(echo "$KVER" | cut -d. -f2)
+KPATCH=$(echo "$KVER" | cut -d. -f3)
+if [ "$KMAJOR" -lt 6 ] || { [ "$KMAJOR" -eq 6 ] && [ "$KMINOR" -lt 18 ]; }; then
+    hard "kernel $KVER is too old; Strix Halo KFD fixes require 6.18.4+"
+elif [ "$KMAJOR" -ge 7 ] || { [ "$KMAJOR" -eq 6 ] && [ "$KMINOR" -ge 18 ]; }; then
+    note "kernel $KVER (6.18.4+ with KFD fixes)"
+else
+    warn "kernel $KVER; verify Strix Halo KFD fixes are present"
+fi
+
+note "=== 2. device permissions ==="
 if [ -e /dev/kfd ]; then
     ls -l /dev/kfd 2>/dev/null | head -1
 else
@@ -46,7 +59,7 @@ case " $(groups 2>/dev/null) " in
     *) warn "user is NOT in the 'render' group (sudo usermod -aG render \$USER)";;
 esac
 
-note "=== 2. gfx1151 capability ==="
+note "=== 3. gfx1151 capability ==="
 if command -v rocminfo >/dev/null 2>&1; then
     if rocminfo 2>/dev/null | grep -A1 "Name:.*gfx1151" >/dev/null; then
         note "rocminfo reports gfx1151"
@@ -57,7 +70,18 @@ else
     warn "rocminfo not installed; skipping gfx1151 check"
 fi
 
-note "=== 3. TTM/GTT limit ==="
+note "=== 4. ROCm version ==="
+if command -v hipcc >/dev/null 2>&1; then
+    ROCM_VER=$(hipcc --version 2>&1 | grep -oP 'HIP version:\s*\K[0-9.]+' || echo "unknown")
+    if [ "$ROCM_VER" = "unknown" ]; then
+        ROCM_VER=$(hipcc --version 2>&1 | head -1)
+    fi
+    note "hipcc/ROCm: $ROCM_VER"
+else
+    hard "hipcc not found; install ROCm 7.2.x (see STRIXHALO.md)"
+fi
+
+note "=== 5. TTM/GTT limit ==="
 if [ -r /sys/module/ttm/parameters/pages_limit ]; then
     pages=$(cat /sys/module/ttm/parameters/pages_limit)
     gib=$(( pages * 4096 / 1073741824 ))
@@ -73,7 +97,7 @@ if [ -r /proc/cmdline ]; then
     fi
 fi
 
-note "=== 4. amd-ttm availability + power/tuning ==="
+note "=== 6. amd-ttm availability + power/tuning ==="
 if [ -x /usr/bin/amd-ttm ]; then
     note "/usr/bin/amd-ttm is present"
 else
@@ -111,28 +135,28 @@ else
     warn "amdgpu.cwsr_enable=0 not set; add it for the Strix Halo tuned profile"
 fi
 
-note "=== 5. BIOS VRAM hint ==="
+note "=== 7. BIOS VRAM hint ==="
 if dmesg 2>/dev/null | grep -iE "VRAM|gttsize" | head -3; then
     note "review above lines; BIOS dedicated VRAM > 512 MB will starve the OS"
 else
     note "no recent dmesg VRAM lines (boot may be stale); dmesg | grep -i vram"
 fi
 
-note "=== 6. runtime profile (smoke test) ==="
+note "=== 8. runtime profile (smoke test) ==="
 if [ -x ./tests/rocm_smoke ]; then
     if ! ./tests/rocm_smoke; then hard "rocm-smoke FAILED"; fi
 else
     warn "./tests/rocm_smoke not built yet (run: make rocm-smoke)"
 fi
 
-note "=== 7. kernel execution bench ==="
+note "=== 9. kernel execution bench ==="
 if [ -x ./tests/rocm_bench_quick ]; then
     if ! ./tests/rocm_bench_quick; then hard "rocm-bench-quick FAILED"; fi
 else
     warn "./tests/rocm_bench_quick not built yet (run: make rocm-bench-quick)"
 fi
 
-note "=== 8. model fit (optional) ==="
+note "=== 10. model fit (optional) ==="
 if [ -n "${DS4_TEST_MODEL:-}" ]; then
     if [ -x ./tests/rocm_model_fit ]; then
         if ! ./tests/rocm_model_fit; then hard "DS4_TEST_MODEL does not fit TTM/GTT limit"; fi
