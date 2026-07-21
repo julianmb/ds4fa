@@ -47,7 +47,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-model-fit rocm-doctor ci
+.PHONY: all help clean test test-metal-session-batch test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-model-fit rocm-doctor rocm-verify ci
 
 ifeq ($(UNAME_S),Darwin)
 all: ds4 ds4-server ds4-bench ds4-eval ds4-agent
@@ -109,6 +109,8 @@ help:
 	@echo "  make rocm                Alias for make strix-halo"
 	@echo "  make rocm-smoke          Build and run the ROCm/Strix Halo hardware smoke test"
 	@echo "  make rocm-model-fit      Report whether DS4_TEST_MODEL fits the TTM/GTT limit"
+	@echo "  make rocm-verify         Full verification: doctor + smoke + bench + model-fit"
+	@echo "  make rocm-doctor         One-screen triage for Strix Halo setup"
 	@echo "  make cpu                 Build CPU-only ./ds4, ./ds4-server, ./ds4-bench, ./ds4-eval, and ./ds4-agent"
 	@echo "  make test                Build and run tests"
 	@echo "  make dspark-verify-depth Run DSpark speculative verification smoke if support GGUF is present"
@@ -180,10 +182,25 @@ rocm-bench-quick: tests/rocm_bench_quick
 rocm-doctor: tests/rocm_smoke tests/rocm_bench_quick
 	sh misc/rocm-doctor.sh
 
-# Fork CI: strict smoke test + upstream divergence policy check.
-ci: tests/rocm_smoke tests/rocm_bench_quick
+# Full verification: doctor + strict smoke + bench + model-fit (if DS4_TEST_MODEL set).
+rocm-verify: tests/rocm_smoke tests/rocm_bench_quick tests/rocm_model_fit
+	sh misc/rocm-doctor.sh
 	ROCM_SMOKE_STRICT=1 ./tests/rocm_smoke
 	./tests/rocm_bench_quick
+	@if [ -n "$$DS4_TEST_MODEL" ]; then \
+		echo "rocm-verify: checking model fit for $$DS4_TEST_MODEL"; \
+		./tests/rocm_model_fit || exit 1; \
+	fi
+	@echo "rocm-verify: ALL PASSED"
+
+# Fork CI: strict smoke test + bench + model-fit (if set) + upstream divergence policy check.
+ci: tests/rocm_smoke tests/rocm_bench_quick tests/rocm_model_fit
+	ROCM_SMOKE_STRICT=1 ./tests/rocm_smoke
+	./tests/rocm_bench_quick
+	@if [ -n "$$DS4_TEST_MODEL" ]; then \
+		echo "ci: checking model fit for $$DS4_TEST_MODEL"; \
+		./tests/rocm_model_fit || exit 1; \
+	fi
 	sh misc/sync-check.sh
 
 ds4: ds4_cli.o ds4_help.o linenoise.o ds4_gpu_args.o $(CORE_OBJS)

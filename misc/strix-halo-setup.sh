@@ -148,6 +148,29 @@ else
     warn "tuned profile may not be set; run: sudo tuned-adm profile accelerator-performance"
 fi
 
+# --- amd-ttm (preferred runtime TTM control) ----------------------------------
+if [ -x /usr/bin/amd-ttm ]; then
+    log "amd-ttm present."
+else
+    info "amd-ttm not found. Installing amd-ttm for runtime TTM/GTT control..."
+    # amd-ttm may be available as a package or standalone binary. Try apt first.
+    if sudo apt-cache show amd-ttm >/dev/null 2>&1; then
+        sudo apt-get install -y -qq amd-ttm 2>/dev/null && log "amd-ttm installed." || \
+            warn "amd-ttm package install failed. Install manually for runtime TTM control."
+    else
+        # Try downloading the standalone binary from the Strix Halo toolboxes repo.
+        AMD_TTM_URL="https://raw.githubusercontent.com/kyuz0/amd-strix-halo-toolboxes/main/amd-ttm"
+        if curl -fsSL "$AMD_TTM_URL" -o /tmp/amd-ttm 2>/dev/null && [ -s /tmp/amd-ttm ]; then
+            sudo install -m 755 /tmp/amd-ttm /usr/bin/amd-ttm && \
+                log "amd-ttm installed from GitHub." || \
+                warn "amd-ttm install failed. Install manually for runtime TTM control."
+            rm -f /tmp/amd-ttm
+        else
+            warn "amd-ttm not available. GRUB kernel params will be the only TTM control."
+        fi
+    fi
+fi
+
 # --- ROCm toolchain presence --------------------------------------------------
 KVER=$(uname -r)
 KMAJOR=$(echo "$KVER" | cut -d. -f1)
