@@ -289,15 +289,31 @@ Key parameters:
 
 ## Model size recommendations
 
-On a 32 GB Strix Halo system (with ~31 GiB visible after BIOS carveout):
+This fork targets **128 GB Strix Halo** systems (Ryzen AI MAX+ 395 / Radeon
+8060S). After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM. The
+TTM/GTT mapping limit should be raised to ~90% of RAM (~108 GiB) via the
+setup script or `amd-ttm`.
 
-| Model class | Quant | Size | Fits? | Notes |
-|-------------|-------|------|-------|-------|
-| 7B dense | Q4_K_M | ~4 GB | Yes | Fast, good quality |
-| 13B dense | Q4_K_M | ~7 GB | Yes | Balanced speed/quality |
-| 30B MoE | Q4_K_M | ~18 GB | Yes | Best speed/quality ratio |
-| 70B dense | Q4_K_M | ~35 GB | Marginal | Needs TTM override or SSD streaming |
-| 120B MoE | UD-IQ4_XS | ~50 GB | No | Requires SSD streaming |
+### DeepSeek V4 Flash (284B)
+
+DeepSeek V4 Flash is the primary large-model target for this fork. GGUF
+quant sizes:
+
+| Quant | Size | Fits in 120 GiB? | Speed | Notes |
+|-------|------|-------------------|-------|-------|
+| UD-IQ2_XXS | ~91 GB | Yes | ~13 t/s | Lowest quality; capacity proof |
+| IQ2_XXS | ~100 GB | Yes | ~12 t/s | Low quality |
+| UD-Q2_K | ~110 GB | Tight | ~10 t/s | May need SSD streaming |
+| Q4_K_M | ~200 GB | No | — | Requires multi-GPU or SSD streaming |
+
+### Other models on 128 GB Strix Halo
+
+| Model | Quant | Size | Speed | Notes |
+|-------|-------|------|-------|-------|
+| Qwen3.6 35B-A3B | Q4_K_M | ~20 GB | ~60 t/s | Best MoE balance |
+| Qwen3-Coder 30B-A3B | Q4_K_M | ~18 GB | ~95 t/s | Fast coding model |
+| Nemotron 3 Super 120B-A12B | UD-IQ4_XS | ~50 GB | ~18 t/s | Large MoE |
+| GLM 5.2 | Q4_K_M | ~25 GB | ~50 t/s | Good general model |
 
 Use `make rocm-model-fit DS4_TEST_MODEL=your.gguf` to check whether a specific
 model fits your TTM/GTT limit before loading it.
@@ -370,7 +386,8 @@ any run to also write a machine-readable `key=value` (or JSON with
 
 ## Running a model
 
-Download a supported GGUF (DeepSeek V4 Flash, GLM 5.2, or a smaller model) and
+This fork targets **128 GB Strix Halo** systems. Download a supported GGUF
+(DeepSeek V4 Flash IQ2XXS ~91 GB, Qwen3.6 35B-A3B ~20 GB, or a smaller model) and
 run it the same way as upstream:
 
 ```sh
