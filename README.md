@@ -60,9 +60,9 @@ improvements over stock ds4 are:
   confirms gfx1151 kernels actually execute and reports bandwidth; `make rocm-doctor`
   is a one-screen triage (OS, permissions, gfx1151, TTM/GTT, amd-ttm, tuned, udev,
   BIOS VRAM, profile, bench, model-fit).
-- **One-shot Ubuntu 26.04 setup.** `misc/strix-halo-ubuntu26-setup.sh` applies the
+- **One-shot Ubuntu 24.04 setup.** `misc/strix-halo-setup.sh` applies the
   persistent GRUB/modprobe/udev/tuned configuration (RAM-sized, CWSR off) and
-  enforces the 26.04 requirement; `misc/99-amd-kfd.rules` ships the GPU-access udev
+  enforces the 24.04 requirement; `misc/99-amd-kfd.rules` ships the GPU-access udev
   rules. Upstream ds4 has no equivalent.
 - **CI policy guard.** `make ci` runs the strict smoke test, the quick bench, and
   `misc/sync-check.sh` (which keeps the fork close to upstream ds4).
@@ -120,19 +120,19 @@ kernel paths a real model load would — without needing any weights.
 
 This is the full loop on a fresh Strix Halo machine.
 
-### 0. One-shot system setup (Ubuntu 26.04 only)
+### 0. One-shot system setup (Ubuntu 24.04 HWE)
 
 A single script applies the persistent configuration the backend needs — RAM-sized
 GRUB `gttsize`/`pages_limit`, CWSR off, `modprobe.d` tuning, udev GPU-access rules,
 `render`/`video` group membership, and the `tuned accelerator-performance` profile.
-It **requires Ubuntu 26.04** (the kernel ships the Strix Halo KFD fixes); other
-distros need Linux 6.18.4+ and must apply the settings by hand. Run it as your
+It **requires Ubuntu 24.04** with HWE kernel (6.18.4+ with KFD fixes); other
+distros need the same kernel and must apply the settings by hand. Run it as your
 normal user (it uses `sudo` internally), then reboot:
 
 ```sh
 git clone https://github.com/julianmb/ds4fa.git ds4-strix-halo
 cd ds4-strix-halo
-bash misc/strix-halo-ubuntu26-setup.sh     # configures GRUB/udev/tuned; reboot after
+bash misc/strix-halo-setup.sh     # configures GRUB/udev/tuned; reboot after
 # copy the udev rules manually if you skipped the script:
 sudo cp misc/99-amd-kfd.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
@@ -142,7 +142,7 @@ on both 31 GiB and 124 GiB boxes. `rocm-doctor` re-checks every item it sets.
 
 ### 1. Install the toolchain
 
-On Ubuntu 26.04 (which already has the Strix Halo KFD fixes):
+On Ubuntu 24.04 with HWE kernel (currently 7.x):
 
 ```sh
 sudo apt-get update
@@ -150,12 +150,12 @@ sudo apt-get install -y \
   hipcc rocminfo rocm-smi libamdhip64-dev \
   libhipblas-dev libhipblaslt-dev librocblas-dev \
   librocwmma-dev libhipcub-dev
-# rocWMMA is missing its internal headers on 26.04; add a matching tree:
+# rocWMMA may be missing internal headers; add a matching tree:
 git clone --depth 1 --branch rocm-7.2.3 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA
 sudo cp -a /tmp/rocWMMA/library/include/rocwmma /usr/local/include/
 ```
 
-(Other distros: use Linux 6.18.4+ or backport the KFD fixes; see
+(Other distros: use Linux 6.18.4+ with the KFD fixes; see
 [STRIXHALO.md](STRIXHALO.md).)
 
 ### 2. Clone and build
@@ -226,8 +226,8 @@ cat ./diag.txt          # machine-readable profile (JSON), attach to issues
 
 - AMD Strix Halo (`gfx1151`), e.g. Framework Desktop / Ryzen AI MAX+.
 - ROCm **7.2.3** (HIP 7.2.x, AMD clang). Newer ROCm 7.2 series is fine.
-- Linux with the Strix Halo KFD fixes. Ubuntu 26.04 includes them; otherwise
-  use Linux **6.18.4** or newer unless the fixes are backported.
+- Ubuntu 24.04 LTS with HWE kernel (currently 7.x) includes the Strix Halo
+  KFD fixes. Other distros need Linux 6.18.4+ or backported fixes.
 
 ## BIOS guidance
 
@@ -343,7 +343,7 @@ README for the streaming model set and `./ds4 --help`.
 - **rocWMMA issues:** ensure ROCm 7.2.x and the matching `rocwmma` package are
   installed; the build pulls `rocwmma` headers via the standard include path.
 - **Driver/KFD errors:** use a kernel with the Strix Halo KFD fixes
-  (Ubuntu 26.04, or Linux 6.18.4+).
+  (Ubuntu 24.04 with HWE kernel, or Linux 6.18.4+).
 
 ## Syncing future upstream changes
 
@@ -356,9 +356,9 @@ git merge upstream/main          # or rebase your Strix Halo work on top
 
 Preferred policy: keep Strix Halo additions confined to `rocm/`, `ds4_rocm.h`,
 `tests/rocm_smoke.c`, the `Makefile` ROCm targets, and this repository's docs.
-Do **not** reintroduce the old `ds4fa` `ds4_hip.cpp` backend, NPU scaffolding,
-or RPC implementation; upstream's ROCm backend and distributed/MTP work are
-newer and more complete. See [FORK_NOTES.md](FORK_NOTES.md).
+Do **not** reintroduce the old `ds4fa` backend or RPC implementation; upstream's
+ROCm backend and distributed/MTP work are newer and more complete. See
+[FORK_NOTES.md](FORK_NOTES.md).
 
 ## Attribution and license
 

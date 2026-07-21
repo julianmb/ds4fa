@@ -42,3 +42,5 @@ misc/RESPONSE_API.md
 /tests/rocm_smoke.o
 /tests/rocm_bench_quick.o
 /tests/rocm_model_fit.o
+codex resume*
+opencode -s *

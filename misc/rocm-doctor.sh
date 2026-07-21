@@ -18,13 +18,13 @@ note() { printf "doctor: %s\n" "$1"; }
 warn() { printf "doctor: WARN: %s\n" "$1"; }
 hard() { printf "doctor: FAIL: %s\n" "$1"; fail=1; }
 
-note "=== 0. OS requirement (Ubuntu 26.04) ==="
+note "=== 0. OS requirement (Ubuntu 24.04 HWE) ==="
 if [ -r /etc/os-release ]; then
     . /etc/os-release
-    if [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_ID:-}" = "26.04" ]; then
-        note "Ubuntu 26.04 (kernel/KFD Strix Halo fixes present)"
+    if [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_ID:-}" = "24.04" ]; then
+        note "Ubuntu 24.04 LTS"
     else
-        hard "expected Ubuntu 26.04; detected ${PRETTY_NAME:-$VERSION_ID}. The ds4 Strix Halo backend assumes the 26.04 kernel/KFD fixes (or Linux 6.18.4+)."
+        hard "expected Ubuntu 24.04; detected ${PRETTY_NAME:-$VERSION_ID}. The ds4 Strix Halo backend assumes Ubuntu 24.04 with HWE kernel (6.18.4+ with KFD fixes)."
     fi
 else
     warn "/etc/os-release not readable; skipping OS check"

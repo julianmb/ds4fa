@@ -5,7 +5,7 @@ Strix Halo machine with 128 GB RAM and Radeon 8060S (`gfx1151`).
 
 ## 1. Install ROCm
 
-On Ubuntu 26.04 LTS, install the ROCm compiler/runtime and libraries used by the Strix Halo backend:
+On Ubuntu 24.04 with HWE kernel (currently 7.x), install the ROCm compiler/runtime and libraries used by the Strix Halo backend:
 
 ```sh
 sudo apt-get update
@@ -18,7 +18,7 @@ sudo apt-get install -y \
   libhipcub-dev
 ```
 
-The backend uses rocWMMA. On this Ubuntu 26.04 setup, `librocwmma-dev`
+The backend uses rocWMMA. On Ubuntu 24.04, `librocwmma-dev`
 installs the top-level rocWMMA headers but misses `rocwmma/internal/`.
 No Ubuntu package currently provides those internal headers. Install a complete
 matching rocWMMA header tree:
@@ -217,7 +217,7 @@ caches. Without pageable access:
   streaming for models that would otherwise use the managed path.
 
 This is a driver/platform property, not a DS4 bug. If you see it, check your
-kernel/KFD build (Ubuntu 26.04 or Linux 6.18.4+ with the Strix Halo fixes) and
+kernel/KFD build (Ubuntu 24.04 with HWE kernel, or Linux 6.18.4+ with the Strix Halo fixes) and
 the ROCm release notes for the `pageable-memory-access` capability on gfx1151.
 
 ### GTT is dynamic, not reserved

@@ -45,10 +45,6 @@ Metal backend and the current ROCm architecture.
 - **`ds4_hip.cpp` backend and `hip/` kernel tree**: upstream's ROCm backend is
   substantially newer and more complete.
 - **Removal of the Metal backend**: this fork keeps upstream backends intact.
-- **Old NPU/XDNA draft-runner scaffolding**: foundational, not a completed
-  acceleration path; upstream now has newer MTP and DSpark work.
-- **Old `ds4_rpc` implementation**: upstream has a newer distributed inference
-  protocol and layer-slicing implementation.
 - **`q4_guard.py`**: its useful checks belong in the runtime (now the startup
   diagnostics), not as a separate script.
 - **The old `ds4fa` README**: describes incomplete or superseded behavior.

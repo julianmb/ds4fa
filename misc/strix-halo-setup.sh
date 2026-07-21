@@ -1,5 +1,5 @@
 #!/bin/bash
-# ds4 Strix Halo (gfx1151) setup for Ubuntu 26.04.
+# ds4 Strix Halo (gfx1151) setup for Ubuntu 24.04.
 #
 # Applies the persistent system configuration the ds4 ROCm backend needs:
 #   1. GRUB kernel parameters (RAM-sized GTT aperture + CWSR off)
@@ -12,8 +12,8 @@
 # After boot-parameter changes, reboot before running ds4.
 #
 # Usage:
-#   sudo -u "$USER" bash misc/strix-halo-ubuntu26-setup.sh   # must NOT run as root
-#   DS4_SETUP_OS=26.04 bash misc/strix-halo-ubuntu26-setup.sh # explicit (still non-root)
+#   sudo -u "$USER" bash misc/strix-halo-setup.sh   # must NOT run as root
+#   DS4_SETUP_OS=24.04 bash misc/strix-halo-setup.sh # explicit (still non-root)
 
 set -euo pipefail
 
@@ -23,13 +23,14 @@ warn() { echo -e "${YELLOW}[!!]${NC} $1"; }
 err()  { echo -e "${RED}[ERR]${NC} $1"; }
 info() { echo -e "${BLUE}[..]${NC} $1"; }
 
-# --- Ubuntu 26.04 requirement -------------------------------------------------
-# The ds4 Strix Halo backend assumes the kernel/KFD fixes shipped in Ubuntu
-# 26.04 (Linux 6.18.4+). Everything in this script targets that release.
+# --- Ubuntu 24.04 requirement -------------------------------------------------
+# The ds4 Strix Halo backend assumes the kernel/KFD fixes shipped in kernel
+# 6.18.4+. Ubuntu 24.04 with HWE kernel (currently 7.x) provides these.
+# Everything in this script targets that release.
 DETECTED_OS="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-unknown}")"
-REQUIRED_OS="${DS4_SETUP_OS:-26.04}"
+REQUIRED_OS="${DS4_SETUP_OS:-24.04}"
 if [ "$DETECTED_OS" != "$REQUIRED_OS" ]; then
-    err "This setup requires Ubuntu ${REQUIRED_OS} (kernel/KFD Strix Halo fixes). Detected: ${DETECTED_OS}."
+    err "This setup requires Ubuntu ${REQUIRED_OS} with HWE kernel (6.18.4+ with KFD fixes). Detected: ${DETECTED_OS}."
     err "On other distros use Linux 6.18.4+ with the KFD fixes; this script only supports Ubuntu ${REQUIRED_OS}."
     if [ "${DS4_SETUP_ALLOW_OS:-0}" = "1" ]; then
         warn "DS4_SETUP_ALLOW_OS=1 set; continuing anyway (unsupported)."
