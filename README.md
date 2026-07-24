@@ -175,10 +175,31 @@ After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM.
 
 | Quant | Size | Fits in 120 GiB? | Speed | Notes |
 |-------|------|:-----------------:|-------|-------|
-| UD-IQ2_XXS | ~91 GB | :white_check_mark: | ~13 t/s | Verified capacity proof |
+| ROCmFPX STRIX | ~102 GB | :white_check_mark: | **32.0 t/s** | **High-throughput LocalMaxxing route** (with DSpark draft + sparse prefill) |
+| UD-IQ2_XXS | ~91 GB | :white_check_mark: | ~13 t/s | Capacity proof route |
 | IQ2_XXS | ~100 GB | :white_check_mark: | ~12 t/s | Low quality |
 | UD-Q2_K | ~110 GB | :warning: | ~10 t/s | May need SSD streaming |
 | Q4_K_M | ~200 GB | :x: | — | Requires multi-GPU or SSD streaming |
+
+### Reaching 32 tok/s LocalMaxxing Speed
+
+1. Download ROCmFPX target model + DSpark drafter:
+   ```sh
+   ./download_model.sh rocmfpx-strix
+   ./download_model.sh dspark-drafter
+   ```
+2. Lock GPU clocks & set performance profile:
+   ```sh
+   echo performance | sudo tee /sys/firmware/acpi/platform_profile
+   sudo rocm-smi -d 0 --setperflevel high
+   ```
+3. Run with fused DSpark verification and sparse prefill (~250 tok/s prefill):
+   ```sh
+   DFLASH_DS4_SPEC=1 DFLASH_DS4_FUSED_VERIFY=1 DFLASH_DS4_SPEC_Q=4 LUCE_MMVQ_MAX_NCOLS=4 \
+     ./ds4-server gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf \
+     --ds4-draft gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf \
+     --ds4-prefill sparse --ds4-fused-decode --ds4-expert-top-k 4 --max-ctx 8192
+   ```
 
 Check fit before loading:
 

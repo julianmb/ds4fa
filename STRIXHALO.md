@@ -180,24 +180,56 @@ make strix-halo -j"$(nproc)"
 
 `make rocm` is an alias for `make strix-halo`.
 
-## 5. Use the right GGUF
+## 5. Model Selection & High-Throughput (32 tok/s) Setup
 
-Use the standard IQ2XXS/Q2K/Q8 imatrix GGUF:
-
+### Standard Capacity Route
+For baseline evaluation and capacity proof:
 ```text
 DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
 ```
 
-Avoid the mixed IQ2/IQ4 or IQ2/Q4 GGUFs on this machine for now. They put much
-more memory pressure on the ROCm path and can trigger system OOM instead of a
-clean DS4 failure.
+### High-Throughput ROCmFPX Route (Up to 32 tok/s decode, ~250 tok/s prefill)
+To achieve maximum local throughput on 128 GB Strix Halo (Radeon 8060S):
+
+1. **Download ROCmFPX 2.88-bit block model and DSpark drafter**:
+   ```sh
+   ./download_model.sh rocmfpx-strix
+   ./download_model.sh dspark-drafter
+   ```
+
+2. **Lock GPU clocks and set performance platform profile**:
+   ```sh
+   echo performance | sudo tee /sys/firmware/acpi/platform_profile
+   sudo rocm-smi -d 0 --setperflevel high
+   ```
+   *Note: Locking GPU clocks at 2.9 GHz prevents dynamic frequency scaling drops.*
+
+3. **Run with DSpark speculation, fused verification, and sparse prefill**:
+   ```sh
+   DFLASH_DS4_SPEC=1 \
+   DFLASH_DS4_FUSED_VERIFY=1 \
+   DFLASH_DS4_SPEC_Q=4 \
+   LUCE_MMVQ_MAX_NCOLS=4 \
+   ./ds4-server gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf \
+     --ds4-draft gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf \
+     --ds4-prefill sparse \
+     --ds4-fused-decode \
+     --ds4-expert-top-k 4 \
+     --max-ctx 8192 --port 8000
+   ```
+
+### Key Performance Innovations Behind 32 tok/s:
+- **ROCmFPX Block Quantization**: 2.88-bit mixed precision (102.3 GB total). Expert gate/up matrices in ROCmFP2, down in ROCmFP3, dense in ROCmFP4. Kernels dequantize directly in registers via AMD byte-permute instructions (`v_perm_b32`).
+- **DSpark Speculative Verification (`q=4`)**: DSpark draft proposes up to 3 tokens; target verifies 4 positions in one fused pass. Fused decode unpacks packed dense weights ONCE in registers across all 4 verification columns (+2.3% gain).
+- **Sparse Prefill**: DeepSeek V4 learned indexer limits compressed-history attention, reaching **~250 tok/s prefill**.
+- **Top-4 Experts Option**: `--ds4-expert-top-k 4` uses 4 experts instead of 6, trading slight quality margin for a ~25% decode speedup.
 
 ## 6. Run DS4
 
 Run it normally:
 
 ```sh
-./ds4 -m gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf
+./ds4 -m gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf
 ```
 
 The ROCm build uses the Strix Halo backend automatically.

@@ -19,6 +19,11 @@ GLM_ANTIREZ_IQ2XXS_FILE="GLM-5.2-UD-IQ2_XXS_RoutedIQ2XXS_blk78Q2K.gguf"
 GLM_ANTIREZ_Q2_FILE="GLM-5.2-UD-Q2_K_RoutedQ2K.gguf"
 GLM_ANTIREZ_Q4_FILE="GLM-5.2-UD-Q4_K_RoutedQ4K.gguf"
 
+ROCMFPX_REPO="Lucebox/DeepSeek-V4-Flash-ROCMFPX"
+ROCMFPX_STRIX_FILE="DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf"
+DSPARK_DRAFTER_REPO="Lucebox/DeepSeek-V4-Flash-DSpark-Drafter-GGUF"
+DSPARK_DRAFTER_FILE="DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf"
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUT_DIR=${DS4_GGUF_DIR:-"$ROOT/gguf"}
 case "$OUT_DIR" in
@@ -45,6 +50,8 @@ Usage:
   ./download_model.sh glm-antirez-iq2xxs [--token TOKEN]
   ./download_model.sh glm-antirez-q2 [--token TOKEN]
   ./download_model.sh glm-antirez-q4 [--token TOKEN]
+  ./download_model.sh rocmfpx-strix [--token TOKEN]
+  ./download_model.sh dspark-drafter [--token TOKEN]
 
 Targets:
 
@@ -86,6 +93,15 @@ Targets:
   dspark-support
        Optional DSpark speculative decoding support GGUF, about 6 GB. Enable it
        with --dspark and --mtp when running ds4 or ds4-server.
+
+  rocmfpx-strix
+       DeepSeek V4 Flash 284B ROCmFPX 2.88-bit block quant (~102 GB).
+       Optimized for 128 GB Strix Halo systems (Radeon 8060S). Reaches up to
+       32.0 tok/s decode with DSpark draft and sparse prefill.
+
+  dspark-drafter
+       DSpark draft model (~5 GB) for speculative verification with
+       rocmfpx-strix. Enables 32.0 tok/s decode throughput.
 
   glm-unsloth-q4
        GLM 5.2 Unsloth UD-Q4_K_XL quant from unsloth/GLM-5.2-GGUF.
@@ -178,6 +194,17 @@ case "$MODEL" in
     glm-antirez-q4)
         REPO=$GLM_ANTIREZ_REPO
         MODEL_FILE=$GLM_ANTIREZ_Q4_FILE
+        FORCE_HF_DOWNLOAD=1
+        ;;
+    rocmfpx-strix)
+        REPO=$ROCMFPX_REPO
+        MODEL_FILE=$ROCMFPX_STRIX_FILE
+        FORCE_HF_DOWNLOAD=1
+        ;;
+    dspark-drafter)
+        REPO=$DSPARK_DRAFTER_REPO
+        MODEL_FILE=$DSPARK_DRAFTER_FILE
+        LINK_MODEL=0
         FORCE_HF_DOWNLOAD=1
         ;;
     -h|--help|help)

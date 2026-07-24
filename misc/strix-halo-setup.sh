@@ -135,7 +135,7 @@ else
     log "User already in GPU groups."
 fi
 
-# --- 5. tuned accelerator-performance -----------------------------------------
+# --- 5. tuned accelerator-performance & GPU performance clocks ----------------
 if ! command -v tuned-adm &>/dev/null; then
     info "Installing tuned..."
     sudo apt install -y tuned
@@ -146,6 +146,15 @@ if tuned-adm active 2>/dev/null | grep -q "accelerator-performance"; then
     log "tuned: accelerator-performance active."
 else
     warn "tuned profile may not be set; run: sudo tuned-adm profile accelerator-performance"
+fi
+
+if [ -w /sys/firmware/acpi/platform_profile ]; then
+    echo performance | sudo tee /sys/firmware/acpi/platform_profile >/dev/null 2>&1 && \
+        log "ACPI platform profile set to performance."
+fi
+if command -v rocm-smi &>/dev/null; then
+    sudo rocm-smi -d 0 --setperflevel high >/dev/null 2>&1 && \
+        log "Radeon GPU clock locked to high performance level (2.9 GHz)."
 fi
 
 # --- amd-ttm (preferred runtime TTM control) ----------------------------------

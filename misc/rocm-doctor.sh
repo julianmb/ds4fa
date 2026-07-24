@@ -129,6 +129,22 @@ case " $(groups 2>/dev/null) " in
     *" render "*) note "user is in the 'render' group";;
     *) warn "user is NOT in the 'render' group";;
 esac
+if [ -r /sys/firmware/acpi/platform_profile ]; then
+    prof=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null || echo "unknown")
+    if [ "$prof" = "performance" ]; then
+        note "ACPI platform_profile: performance"
+    else
+        warn "ACPI platform_profile is '$prof' (run: echo performance | sudo tee /sys/firmware/acpi/platform_profile)"
+    fi
+fi
+if command -v rocm-smi >/dev/null 2>&1; then
+    perf=$(rocm-smi -d 0 --showperflevel 2>/dev/null | grep -i "performance level" | head -1 || echo "unknown")
+    if echo "$perf" | grep -qi "high"; then
+        note "rocm-smi GPU perf level: high (2.9 GHz clock lock)"
+    else
+        warn "rocm-smi GPU perf level not set to high (run: sudo rocm-smi -d 0 --setperflevel high)"
+    fi
+fi
 if grep -q "amdgpu.cwsr_enable=0" /proc/cmdline 2>/dev/null; then
     note "amdgpu.cwsr_enable=0 set (CWSR disabled)"
 else
