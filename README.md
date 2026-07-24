@@ -40,8 +40,9 @@ cd ds4-strix-halo
 bash misc/strix-halo-setup.sh        # configure system; reboot after
 make strix-halo -j"$(nproc)"         # build for gfx1151
 make rocm-doctor                     # verify setup
-make rocm-smoke                      # hardware validation
-./ds4-server ds4flash.gguf           # run DeepSeek V4 Flash
+./download_model.sh rocmfpx-strix    # download DeepSeek V4 Flash ROCmFPX (~102 GB)
+./download_model.sh dspark-drafter   # download DSpark draft model (~11 GB)
+./run-deepseek-v4.sh                 # run 32 tok/s high-throughput server
 ```
 
 <details>
@@ -195,6 +196,8 @@ After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM.
    ```
 3. Run with fused DSpark verification and sparse prefill (~250 tok/s prefill):
    ```sh
+   ./run-deepseek-v4.sh   # convenience launcher
+   # or manually:
    DFLASH_DS4_SPEC=1 DFLASH_DS4_FUSED_VERIFY=1 DFLASH_DS4_SPEC_Q=4 LUCE_MMVQ_MAX_NCOLS=4 \
      ./ds4-server gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf \
      --ds4-draft gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf \

@@ -157,6 +157,28 @@ if command -v rocm-smi &>/dev/null; then
         log "Radeon GPU clock locked to high performance level (2.9 GHz)."
 fi
 
+# Install persistent boot service for GPU clock lock & performance profile
+PERF_SERVICE="/etc/systemd/system/strix-halo-performance.service"
+if [ ! -f "$PERF_SERVICE" ]; then
+    info "Installing strix-halo-performance.service for boot-time GPU clock lock..."
+    sudo tee "$PERF_SERVICE" > /dev/null << 'SERVICE'
+[Unit]
+Description=Strix Halo GPU Performance & Clock Lock
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'if [ -w /sys/firmware/acpi/platform_profile ]; then echo performance > /sys/firmware/acpi/platform_profile; fi; if command -v rocm-smi >/dev/null 2>&1; then rocm-smi -d 0 --setperflevel high >/dev/null 2>&1; fi'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+    sudo systemctl daemon-reload
+    sudo systemctl enable strix-halo-performance.service >/dev/null 2>&1 && \
+        log "Persistent GPU performance service enabled."
+fi
+
 # --- amd-ttm (preferred runtime TTM control) ----------------------------------
 if [ -x /usr/bin/amd-ttm ]; then
     log "amd-ttm present."
