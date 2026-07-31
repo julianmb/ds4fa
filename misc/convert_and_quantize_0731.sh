@@ -19,17 +19,17 @@ if [ ! -x "${ROCMFPX_DIR}/build-strix-rocmfp4/bin/llama-quantize" ]; then
 fi
 
 echo "=== 2. Downloading DeepSeek-V4-Flash-0731 MXFP4 GGUF Shards (~156 GB) ==="
-HF_CMD="$(command -v huggingface-cli || echo "${HOME}/.local/bin/huggingface-cli")"
-if ! command -v "$HF_CMD" &>/dev/null; then
-    echo "huggingface-cli not found; installing..."
-    python3 -m pip install -q huggingface_hub --break-system-packages
-fi
+HF_CMD="$(command -v hf || command -v huggingface-cli || echo "${HOME}/.local/bin/hf")"
 
 RAW_DIR="${OUT_DIR}/0731-mxfp4"
 mkdir -p "$RAW_DIR"
 
-echo "Downloading MXFP4 GGUF shards..."
-"$HF_CMD" download "$MXFP4_REPO" --include "DeepSeek-V4-Flash-0731-MXFP4/*" --local-dir "$RAW_DIR"
+echo "Downloading MXFP4 GGUF shards using $HF_CMD..."
+if [ "$(basename "$HF_CMD")" = "hf" ]; then
+    "$HF_CMD" download "$MXFP4_REPO" --include "DeepSeek-V4-Flash-0731-MXFP4/*" --local-dir "$RAW_DIR"
+else
+    python3 -c "import huggingface_hub; huggingface_hub.snapshot_download('$MXFP4_REPO', allow_patterns=['DeepSeek-V4-Flash-0731-MXFP4/*'], local_dir='$RAW_DIR')"
+fi
 
 FIRST_SHARD="${RAW_DIR}/DeepSeek-V4-Flash-0731-MXFP4/DeepSeek-V4-Flash-0731-MXFP4-00001-of-00004.gguf"
 
