@@ -171,12 +171,12 @@ Two escape hatches let you act on them:
 
 ## DeepSeek V4 Flash model sizes
 
-This fork targets **128 GB Strix Halo** systems running **DeepSeek V4 Flash (284B)**.
-After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM.
+This fork targets **128 GB Strix Halo** systems running **DeepSeek V4 Flash** (including the new **DeepSeek-V4-Flash-0731** release). After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM.
 
-| Quant | Size | Fits in 120 GiB? | Speed | Notes |
-|-------|------|:-----------------:|-------|-------|
-| ROCmFPX STRIX | ~102 GB | :white_check_mark: | **32.0 t/s** | **High-throughput LocalMaxxing route** (with DSpark draft + sparse prefill) |
+| Model / Quant | Size | Fits in 120 GiB? | Speed | Notes |
+|---------------|------|:-----------------:|-------|-------|
+| DeepSeek-V4-Flash-0731 (ROCmFP2) | ~98 GB | :white_check_mark: | **32.0 t/s** | **July 31 official release** (TerminalBench 82.7, DeepSWE 54.4) |
+| ROCmFPX STRIX (284B) | ~102 GB | :white_check_mark: | **32.0 t/s** | **High-throughput LocalMaxxing route** (with DSpark draft) |
 | UD-IQ2_XXS | ~91 GB | :white_check_mark: | ~13 t/s | Capacity proof route |
 | IQ2_XXS | ~100 GB | :white_check_mark: | ~12 t/s | Low quality |
 | UD-Q2_K | ~110 GB | :warning: | ~10 t/s | May need SSD streaming |

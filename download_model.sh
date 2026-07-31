@@ -99,6 +99,11 @@ Targets:
        Optimized for 128 GB Strix Halo systems (Radeon 8060S). Reaches up to
        32.0 tok/s decode with DSpark draft and sparse prefill.
 
+  v4-flash-0731
+       Newly released official DeepSeek-V4-Flash-0731 (July 31 release).
+       Enhanced agentic & reasoning capabilities (TerminalBench 82.7, DeepSWE 54.4).
+       Downloads HF safetensors for local ROCmFPX quantization.
+
   dspark-drafter
        DSpark draft model (~5 GB) for speculative verification with
        rocmfpx-strix. Enables 32.0 tok/s decode throughput.
