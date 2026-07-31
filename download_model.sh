@@ -212,6 +212,10 @@ case "$MODEL" in
         LINK_MODEL=0
         FORCE_HF_DOWNLOAD=1
         ;;
+    v4-flash-0731)
+        echo "Running convert_and_quantize_0731.sh helper script..."
+        exec "${ROOT}/misc/convert_and_quantize_0731.sh"
+        ;;
     -h|--help|help)
         usage
         exit 0

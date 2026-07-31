@@ -182,27 +182,27 @@ This fork targets **128 GB Strix Halo** systems running **DeepSeek V4 Flash** (i
 | UD-Q2_K | ~110 GB | :warning: | ~10 t/s | May need SSD streaming |
 | Q4_K_M | ~200 GB | :x: | — | Requires multi-GPU or SSD streaming |
 
-### Reaching 32 tok/s LocalMaxxing Speed
+### Quantizing the New DeepSeek-V4-Flash-0731 (July 31 Release)
 
-1. Download ROCmFPX target model + DSpark drafter:
-   ```sh
-   ./download_model.sh rocmfpx-strix
-   ./download_model.sh dspark-drafter
-   ```
-2. Lock GPU clocks & set performance profile:
-   ```sh
-   echo performance | sudo tee /sys/firmware/acpi/platform_profile
-   sudo rocm-smi -d 0 --setperflevel high
-   ```
-3. Run with fused DSpark verification and sparse prefill (~250 tok/s prefill):
-   ```sh
-   ./run-deepseek-v4.sh   # convenience launcher
-   # or manually:
-   DFLASH_DS4_SPEC=1 DFLASH_DS4_FUSED_VERIFY=1 DFLASH_DS4_SPEC_Q=4 LUCE_MMVQ_MAX_NCOLS=4 \
-     ./ds4-server gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf \
-     --ds4-draft gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf \
-     --ds4-prefill sparse --ds4-fused-decode --ds4-expert-top-k 4 --max-ctx 8192
-   ```
+To quantize the newly released **DeepSeek-V4-Flash-0731** to ROCmFP2 (`Q2_0_ROCMFPX` ~98 GB):
+
+```sh
+# One-shot conversion and quantization script
+./download_model.sh v4-flash-0731
+```
+
+Or run manually via ROCmFPX:
+```sh
+# Convert HF safetensors to GGUF using ROCmFPX converter
+python3 ../ROCmFPX/scripts/convert_deepseek_v4_modular.py \
+  ~/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/9e165c30e2704aec5d9d593cce3eebd58bbef1cb \
+  --outfile gguf/DeepSeek-V4-Flash-0731-BF16.gguf --deepseek4-include-mtp
+
+# Quantize to ROCmFP2 (Q2_0_ROCMFPX) ~98 GB
+../ROCmFPX/build-strix-rocmfp4/bin/llama-quantize \
+  gguf/DeepSeek-V4-Flash-0731-BF16.gguf \
+  gguf/DeepSeek-V4-Flash-0731-ROCMFP2-STRIX.gguf Q2_0_ROCMFPX
+```
 
 Check fit before loading:
 
