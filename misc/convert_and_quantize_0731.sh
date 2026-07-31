@@ -19,19 +19,25 @@ if [ ! -x "${ROCMFPX_DIR}/build-strix-rocmfp4/bin/llama-quantize" ]; then
 fi
 
 echo "=== 2. Downloading DeepSeek-V4-Flash-0731 MXFP4 GGUF Shards (~156 GB) ==="
-HF_CMD="$(command -v hf || command -v huggingface-cli || echo "${HOME}/.local/bin/hf")"
-
 RAW_DIR="${OUT_DIR}/0731-mxfp4"
 mkdir -p "$RAW_DIR"
 
-echo "Downloading MXFP4 GGUF shards using $HF_CMD..."
-if [ "$(basename "$HF_CMD")" = "hf" ]; then
-    "$HF_CMD" download "$MXFP4_REPO" --include "DeepSeek-V4-Flash-0731-MXFP4/*" --local-dir "$RAW_DIR"
-else
-    python3 -c "import huggingface_hub; huggingface_hub.snapshot_download('$MXFP4_REPO', allow_patterns=['DeepSeek-V4-Flash-0731-MXFP4/*'], local_dir='$RAW_DIR')"
-fi
+echo "Downloading MXFP4 GGUF shards via huggingface_hub..."
+python3 -c "
+import huggingface_hub
+huggingface_hub.snapshot_download(
+    repo_id='$MXFP4_REPO',
+    allow_patterns=['DeepSeek-V4-Flash-0731-MXFP4/*'],
+    local_dir='$RAW_DIR'
+)
+"
 
 FIRST_SHARD="${RAW_DIR}/DeepSeek-V4-Flash-0731-MXFP4/DeepSeek-V4-Flash-0731-MXFP4-00001-of-00004.gguf"
+
+if [ ! -f "$FIRST_SHARD" ]; then
+    echo "Error: Expected first shard not found at $FIRST_SHARD" >&2
+    exit 1
+fi
 
 echo "=== 3. Requantizing MXFP4 to Q2_0_ROCMFPX (ROCmFP2 2.50 bpw ~98 GB) ==="
 "${ROCMFPX_DIR}/build-strix-rocmfp4/bin/llama-quantize" \
