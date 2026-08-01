@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-# Persistent downloader for DeepSeek-V4-Flash-0731 GGUF
+# Persistent downloader for DeepSeek-V4-Flash-0731 GGUF with hf_transfer multi-connection acceleration
 
 import os
 import sys
 import time
 from pathlib import Path
+
+# Enable high-speed Rust multi-threaded hf_transfer backend
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
 from huggingface_hub import hf_hub_download
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,7 +37,7 @@ def download_with_retry(repo_id: str, filename: str, target: Path):
         log(f"Target file {target.name} already exists. Skipping download.")
         return
 
-    log(f"Starting download: {filename} from {repo_id}...")
+    log(f"Starting accelerated download (hf_transfer enabled): {filename} from {repo_id}...")
     for attempt in range(1, 10):
         try:
             downloaded_path = hf_hub_download(
@@ -53,7 +57,7 @@ def download_with_retry(repo_id: str, filename: str, target: Path):
     log(f"Failed to download {filename} after 10 attempts.")
 
 if __name__ == "__main__":
-    log("=== DeepSeek-V4-Flash-0731 Persistent Downloader Started ===")
+    log("=== DeepSeek-V4-Flash-0731 Persistent Downloader Started (hf_transfer) ===")
     download_with_retry(MODEL_REPO, MODEL_FILE, DEST_FILE)
     download_with_retry(DSPARK_REPO, DSPARK_FILE, DEST_DSPARK)
 
