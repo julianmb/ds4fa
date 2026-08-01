@@ -4,4 +4,4 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-python3 "${ROOT}/misc/download_0731.py"
+bash "${ROOT}/misc/download_0731_aria2.sh"
