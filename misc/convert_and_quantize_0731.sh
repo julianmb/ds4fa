@@ -15,13 +15,20 @@ DSPARK_REPO="sm54/deepseek-v4-flash-0731-gguf"
 DSPARK_FILE="DeepSeek-V4-Flash-0731-DSpark-support.gguf"
 DEST_DSPARK="${OUT_DIR}/DeepSeek-V4-Flash-0731-DSpark-support.gguf"
 
-HF_CMD="$(command -v hf || command -v huggingface-cli || echo "${HOME}/.local/bin/hf")"
-
 echo "=== 1. Downloading DeepSeek-V4-Flash-0731 GGUF (~86.7 GB) ==="
 if [ ! -f "$DEST_FILE" ]; then
     echo "Downloading target GGUF from $MODEL_REPO..."
-    "$HF_CMD" download "$MODEL_REPO" "$MODEL_FILE" --local-dir "$OUT_DIR"
-    mv "${OUT_DIR}/${MODEL_FILE}" "$DEST_FILE"
+    python3 -c "
+import huggingface_hub
+huggingface_hub.hf_hub_download(
+    repo_id='$MODEL_REPO',
+    filename='$MODEL_FILE',
+    local_dir='$OUT_DIR'
+)
+"
+    if [ -f "${OUT_DIR}/${MODEL_FILE}" ]; then
+        mv "${OUT_DIR}/${MODEL_FILE}" "$DEST_FILE"
+    fi
 else
     echo "Target GGUF already present at $DEST_FILE"
 fi
@@ -29,7 +36,14 @@ fi
 echo "=== 2. Downloading DeepSeek-V4-Flash-0731 DSpark Support GGUF (~5.9 GB) ==="
 if [ ! -f "$DEST_DSPARK" ]; then
     echo "Downloading DSpark draft GGUF from $DSPARK_REPO..."
-    "$HF_CMD" download "$DSPARK_REPO" "$DSPARK_FILE" --local-dir "$OUT_DIR"
+    python3 -c "
+import huggingface_hub
+huggingface_hub.hf_hub_download(
+    repo_id='$DSPARK_REPO',
+    filename='$DSPARK_FILE',
+    local_dir='$OUT_DIR'
+)
+"
 else
     echo "DSpark draft GGUF already present at $DEST_DSPARK"
 fi
