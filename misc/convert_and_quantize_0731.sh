@@ -1,54 +1,45 @@
 #!/bin/bash
-# Convert and quantize DeepSeek-V4-Flash-0731 to ROCmFP2 (Q2_0_ROCMFPX) for Strix Halo.
+# Download and setup DeepSeek-V4-Flash-0731 (July 31 Official Release) for Strix Halo.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ROCMFPX_DIR="${ROOT}/../ROCmFPX"
-MXFP4_REPO="bartowski/DeepSeek-V4-Flash-0731-GGUF"
 OUT_DIR="${ROOT}/gguf"
 mkdir -p "$OUT_DIR"
 
-QUANT_OUT="${OUT_DIR}/DeepSeek-V4-Flash-0731-ROCMFP2-STRIX.gguf"
+MODEL_REPO="tekosML/DeepSeek-V4-Flash-0731-GGUF-GX10"
+MODEL_FILE="DeepSeek-V4-Flash-0731-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf"
+DEST_FILE="${OUT_DIR}/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX.gguf"
 
-echo "=== 1. Checking ROCmFPX Tooling ==="
-if [ ! -x "${ROCMFPX_DIR}/build-strix-rocmfp4/bin/llama-quantize" ]; then
-    echo "Building ROCmFPX tools in ${ROCMFPX_DIR}..."
-    cd "$ROCMFPX_DIR"
-    env JOBS=16 scripts/build-strix-rocmfp4-mtp.sh
+DSPARK_REPO="sm54/deepseek-v4-flash-0731-gguf"
+DSPARK_FILE="DeepSeek-V4-Flash-0731-DSpark-support.gguf"
+DEST_DSPARK="${OUT_DIR}/DeepSeek-V4-Flash-0731-DSpark-support.gguf"
+
+HF_CMD="$(command -v hf || command -v huggingface-cli || echo "${HOME}/.local/bin/hf")"
+
+echo "=== 1. Downloading DeepSeek-V4-Flash-0731 GGUF (~86.7 GB) ==="
+if [ ! -f "$DEST_FILE" ]; then
+    echo "Downloading target GGUF from $MODEL_REPO..."
+    "$HF_CMD" download "$MODEL_REPO" "$MODEL_FILE" --local-dir "$OUT_DIR"
+    mv "${OUT_DIR}/${MODEL_FILE}" "$DEST_FILE"
+else
+    echo "Target GGUF already present at $DEST_FILE"
 fi
 
-echo "=== 2. Downloading DeepSeek-V4-Flash-0731 MXFP4 GGUF Shards (~156 GB) ==="
-RAW_DIR="${OUT_DIR}/0731-mxfp4"
-mkdir -p "$RAW_DIR"
-
-echo "Downloading MXFP4 GGUF shards via huggingface_hub..."
-python3 -c "
-import huggingface_hub
-huggingface_hub.snapshot_download(
-    repo_id='$MXFP4_REPO',
-    allow_patterns=['DeepSeek-V4-Flash-0731-MXFP4/*'],
-    local_dir='$RAW_DIR'
-)
-"
-
-FIRST_SHARD="${RAW_DIR}/DeepSeek-V4-Flash-0731-MXFP4/DeepSeek-V4-Flash-0731-MXFP4-00001-of-00004.gguf"
-
-if [ ! -f "$FIRST_SHARD" ]; then
-    echo "Error: Expected first shard not found at $FIRST_SHARD" >&2
-    exit 1
+echo "=== 2. Downloading DeepSeek-V4-Flash-0731 DSpark Support GGUF (~5.9 GB) ==="
+if [ ! -f "$DEST_DSPARK" ]; then
+    echo "Downloading DSpark draft GGUF from $DSPARK_REPO..."
+    "$HF_CMD" download "$DSPARK_REPO" "$DSPARK_FILE" --local-dir "$OUT_DIR"
+else
+    echo "DSpark draft GGUF already present at $DEST_DSPARK"
 fi
 
-echo "=== 3. Requantizing MXFP4 to Q2_0_ROCMFPX (ROCmFP2 2.50 bpw ~98 GB) ==="
-"${ROCMFPX_DIR}/build-strix-rocmfp4/bin/llama-quantize" \
-    --allow-requantize \
-    "$FIRST_SHARD" \
-    "$QUANT_OUT" \
-    Q2_0_ROCMFPX
+echo "=== 3. Linking to ds4flash.gguf ==="
+ln -sfn "$DEST_FILE" "${ROOT}/ds4flash.gguf"
 
-echo "=== 4. Cleaning Up MXFP4 Source Shards to Save Disk Space ==="
-rm -rf "$RAW_DIR"
-
-echo "Done! Quantized model written to: $QUANT_OUT"
-echo "Run it with:"
-echo "  ./run-deepseek-v4.sh --model $QUANT_OUT"
+echo "Done! DeepSeek-V4-Flash-0731 downloaded successfully."
+echo "Target Model: $DEST_FILE (86.7 GB)"
+echo "Draft Model:  $DEST_DSPARK (5.9 GB)"
+echo ""
+echo "Run it with 32 tok/s LocalMaxxing speed:"
+echo "  ./run-deepseek-v4.sh --model $DEST_FILE --draft $DEST_DSPARK"
