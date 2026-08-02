@@ -93,7 +93,7 @@ fi
 
 if [ "$MODE" = "server" ]; then
     echo "Starting ds4-server on http://127.0.0.1:${PORT} (top-k=${TOP_K} experts, prefill=${PREFILL})..."
-    exec "${ROOT}/ds4-server" "$MODEL" \
+    exec "${ROOT}/ds4-server" -m "$MODEL" \
         $DRAFT_ARG \
         --ds4-prefill "$PREFILL" \
         --ds4-fused-decode \
@@ -102,7 +102,7 @@ if [ "$MODE" = "server" ]; then
         --port "$PORT"
 else
     echo "Starting ds4 interactive CLI..."
-    exec "${ROOT}/ds4" "$MODEL" \
+    exec "${ROOT}/ds4" -m "$MODEL" \
         $DRAFT_ARG \
         --ds4-prefill "$PREFILL" \
         --ds4-fused-decode \
