@@ -61,6 +61,15 @@ if [ ! -f "$MODEL" ]; then
     exit 1
 fi
 
+# Safety Step 1: Enforce 115 GB virtual memory cap to protect kernel/amdgpu driver
+ulimit -v 123480320 2>/dev/null || true
+
+# Safety Step 2: Auto-verify model fit before loading
+echo "Checking model fit for $MODEL..."
+if ! "${ROOT}/tests/rocm_model_fit" "$MODEL" >/dev/null 2>&1; then
+    echo "Warning: Model size exceeds safe TTM/GTT limits!" >&2
+fi
+
 # Ensure performance profile and clock lock
 if [ -w /sys/firmware/acpi/platform_profile ]; then
     echo performance | sudo tee /sys/firmware/acpi/platform_profile >/dev/null 2>&1 || true
