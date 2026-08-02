@@ -5531,7 +5531,12 @@ static void config_validate_fixed_shape(uint32_t n_layer) {
 static void config_validate_deepseek4_model(const ds4_model *m) {
     const uint32_t n_layer = required_u32(m, "deepseek4.block_count");
     const uint32_t n_embd = required_u32(m, "deepseek4.embedding_length");
-    const uint32_t n_vocab = required_u32(m, "deepseek4.vocab_size");
+    uint32_t n_vocab = 0;
+    if (!model_get_u32(m, "deepseek4.vocab_size", &n_vocab)) {
+        if (!model_get_u32(m, "general.vocab_size", &n_vocab)) {
+            n_vocab = 129280u; /* DeepSeek V4 Flash standard vocabulary size */
+        }
+    }
     const uint32_t n_head = required_u32(m, "deepseek4.attention.head_count");
     const uint32_t n_head_kv = required_u32(m, "deepseek4.attention.head_count_kv");
     const uint32_t n_head_dim = required_u32(m, "deepseek4.attention.key_length");
