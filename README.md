@@ -1,6 +1,6 @@
 <p align="center">
   <strong>DeepSeek V4 Flash on AMD Strix Halo</strong><br>
-  <em>ROCm 7.2 diagnostics, smoke tests, and one-shot setup for antirez/ds4</em>
+  <em>Tuned Strix Halo (gfx1151) fork of antirez/ds4 with ROCm 7.2.x diagnostics, SSD expert streaming, and DeepSeek-V4-Flash-0731 support</em>
 </p>
 
 <p align="center">
@@ -8,286 +8,201 @@
   <img src="https://img.shields.io/badge/platform-AMD%20Strix%20Halo%20gfx1151-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/ROCm-7.2.x-e95420?style=flat-square" alt="ROCm">
   <img src="https://img.shields.io/badge/Ubuntu-24.04%20HWE-orange?style=flat-square" alt="Ubuntu">
-  <img src="https://img.shields.io/badge/model-DeepSeek%20V4%20Flash%20284B-purple?style=flat-square" alt="Model">
+  <img src="https://img.shields.io/badge/model-DeepSeek%20V4%20Flash%200731-purple?style=flat-square" alt="Model">
 </p>
 
 ---
 
-A tuned fork of [antirez/ds4](https://github.com/antirez/ds4) for **AMD Ryzen AI MAX+** ("Strix Halo") hardware. This repository does not change how DS4 runs models — it adds hardware diagnostics, smoke tests, and one-shot configuration on top of upstream's ROCm backend.
+A focused Strix Halo (`gfx1151`) fork of [antirez/ds4](https://github.com/antirez/ds4) optimized for **AMD Ryzen AI MAX+** systems (128 GB unified memory / Radeon 8060S). It adds ROCm 7.2.x hardware diagnostics, SSD expert streaming fixes, GPU kernel additions, and native support for the official **DeepSeek-V4-Flash-0731** release.
 
-> **Target hardware:** 128 GB Strix Halo (Ryzen AI MAX+ 395 / Radeon 8060S) with Ubuntu 24.04 HWE kernel.
+> **Target hardware:** 128 GB Strix Halo (Ryzen AI MAX+ 395 / Radeon 8060S) with Ubuntu 24.04 HWE kernel (6.18.4+).
 
-## What's in the box
+---
 
-| Feature | Status | Description |
-|---------|--------|-------------|
-| **Startup diagnostics** | `make rocm-diag` | Prints gfx1151 arch, HIP/ROCm versions, memory flags, TTM/GTT limit |
-| **Misconfiguration warnings** | auto | Detects non-gfx1151, old HIP, low TTM, model too close to limit |
-| **Actionable fix** | auto | Prints exact `sudo amd-ttm --set-pages N` command |
-| **Model fit verdict** | `make rocm-model-fit` | Pass/fail gate for `DS4_TEST_MODEL` |
-| **Machine-readable diag** | `DS4_ROCM_DIAG` | key=value or JSON output for CI and bug reports |
-| **Hardware smoke test** | `make rocm-smoke` | Allocation/copy/mapping — no weights needed |
-| **Quick bench** | `make rocm-bench-quick` | Confirms gfx1151 kernels execute; reports bandwidth |
-| **10-step doctor** | `make rocm-doctor` | OS, permissions, arch, ROCm, TTM, tuned, bench, model-fit |
-| **One-shot setup** | `misc/strix-halo-setup.sh` | GRUB, modprobe, udev, tuned, ROCm install |
-| **CI guard** | `make ci` | Strict smoke + bench + upstream sync check |
+## What We Improved Over Original `antirez/ds4`
 
-## Quick start
+The original `antirez/ds4` repository provided the initial ROCm backend for DeepSeek V4 Flash. This fork (`ds4fa`) adds the following core improvements for Strix Halo hardware:
+
+### 1. Fixed SSD Expert Streaming Slab Allocator (`ds4.c`)
+* **Problem in upstream**: Mixed-precision GGUFs (like 0731) have varying per-expert byte sizes across layers (e.g. Layer 26 uses `IQ2_S` gate/up experts at 82 B/256 vs `IQ2_XXS` at 66 B/256). Upstream pinned the SSD expert streaming cache slab size to the *first* routed layer's byte size (`7,077,888 B`), causing Layer 26 to be rejected from the slab pool and forced into pageable mapped model views. On ROCm systems without unified pageable migration enabled, accessing mapped views during GPU execution triggered MMU page faults.
+* **Fix**: Updated `ds4_streaming_routed_expert_bytes` to set the slab size class to the **maximum** per-expert size across all 43 layers (`8,126,464 B`), and updated the uniformity check to `bytes <= base`.
+* **Result**: **0 out of 43 layers off the slab size class!** 100% of routed expert layers are served directly from the SSD expert cache with zero MMU faults.
+
+### 2. Added `Q4_K` Token Embedding GPU Kernels (`rocm/ds4_rocm_common.cuh` & `rocm/ds4_rocm_embedding_launch.cuh`)
+* Added `embed_token_hc_q4_k_kernel` and `embed_tokens_hc_q4_k_kernel` to allow loading models with `Q4_K` token embedding weights directly on GPU without host fallback.
+
+### 3. Added `Q4_K` & `BF16` Dense Matmul GPU Kernels (`rocm/ds4_rocm_matmul.cuh` & `ds4_rocm_compat.cu`)
+* Added `matmul_q4_k_f32_sharedx_warp_rows_w32_kernel` and `matmul_q4_k_f32_batch_warp8_kernel` for `Q4_K` dense matrix multiplications.
+* Added `matmul_bf16_ordered_chunks_kernel` for `BF16` dense matrix multiplications.
+
+### 4. Built `MXFP4`-to-`Q2_K` Requantization Tool (`gguf-tools/requant_down_q2k.c`)
+* Created an in-place GGUF requantization tool with bit-exact `MXFP4` (GGUF type 39) dequantization and correct interleaved element ordering to convert `IQ3_XXS` and `MXFP4` down experts into custom `Q2_K` (type 10) in under 2 minutes.
+
+### 5. Hardware Diagnostics & TTM/GTT Auto-Sizing
+* Added `make rocm-diag`, `make rocm-doctor`, `make rocm-smoke`, `make rocm-bench-quick`, and `DS4_ROCM_TTM_AUTORAISE=1` to detect non-`gfx1151` architectures, low TTM limits, and automatically size the GTT aperture to ~90% of visible RAM.
+
+---
+
+## DeepSeek-V4-Flash-0731 Model Architecture & Recipe
+
+**DeepSeek-V4-Flash-0731** is a 284B parameter Mixture-of-Experts (MoE) model featuring:
+* **43 routed layers**
+* **256 total experts per layer** with **6 active experts** per token
+* **4-stream hyper-connections** and **shared FFN experts**
+* **DeepSeek reasoning mode** (`<think>...</think>` tags)
+
+### Recommended Model Recipe
+
+To run on `ds4fa` without modifying GPU kernels, the model tensors must match the engine's kernel expectations:
+
+```
+tekosML/DeepSeek-V4-Flash-0731-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf (86.72 GB)
+```
+
+| Tensor Group | GGUF Tensor Name | Quantization Type | Status |
+| :--- | :--- | :--- | :--- |
+| **Attention Projections** | `attn_q_a`, `attn_q_b`, `attn_kv`, `attn_output_a/b` | `Q8_0` (type 8) | ✅ Matched |
+| **Shared Experts** | `ffn_gate_shexp`, `ffn_up_shexp`, `ffn_down_shexp` | `Q8_0` (type 8) | ✅ Matched |
+| **Output Language Head** | `output.weight` | `Q8_0` (type 8) | ✅ Matched |
+| **Token Embedding** | `token_embd.weight` | `F16` (type 1) | ✅ Matched |
+| **Routed Gate & Up Experts**| `ffn_gate_exps`, `ffn_up_exps` | `IQ2_XXS` (type 16) | ✅ Matched |
+| **Routed Down Experts** | `ffn_down_exps` | `Q2_K` (type 10) | ✅ Matched |
+
+---
+
+## Step-by-Step Installation & Setup
+
+### 1. Clone the Repository
 
 ```sh
 git clone https://github.com/julianmb/ds4fa.git ds4-strix-halo
 cd ds4-strix-halo
-bash misc/strix-halo-setup.sh        # configure system; reboot after
-make strix-halo -j"$(nproc)"         # build for gfx1151
-make rocm-doctor                     # verify setup
-./download_model.sh rocmfpx-strix    # download DeepSeek V4 Flash ROCmFPX (~102 GB)
-./download_model.sh dspark-drafter   # download DSpark draft model (~11 GB)
-./run-deepseek-v4.sh                 # run 32 tok/s high-throughput server
 ```
 
-<details>
-<summary><strong>Full step-by-step guide</strong></summary>
+### 2. Run One-Shot System Setup
 
-### 1. Clone and one-shot setup (Ubuntu 24.04 HWE)
+Run the automated setup script to configure GRUB parameters, udev rules, and tuned profiles:
 
 ```sh
-git clone https://github.com/julianmb/ds4fa.git ds4-strix-halo
-cd ds4-strix-halo
-bash misc/strix-halo-setup.sh     # configures GRUB/udev/tuned; reboot after
+bash misc/strix-halo-setup.sh
 ```
 
-The script applies RAM-sized GRUB `gttsize`/`pages_limit`, CWSR off, `modprobe.d`
-tuning, udev GPU-access rules, `render`/`video` group membership, and the
-`tuned accelerator-performance` profile. It sizes the GTT aperture to ~90% of
-visible RAM. **Requires Ubuntu 24.04** with HWE kernel (6.18.4+ with KFD fixes).
+> **Note:** Reboot your machine after running `strix-halo-setup.sh` for the GRUB `amdgpu.gttsize` and `ttm.pages_limit` parameters to take effect.
 
-### 2. Install the toolchain
+### 3. Install System Dependencies
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y \
   hipcc rocminfo rocm-smi libamdhip64-dev \
   libhipblas-dev libhipblaslt-dev librocblas-dev \
-  librocwmma-dev libhipcub-dev
-# rocWMMA may be missing internal headers; add a matching tree:
+  librocwmma-dev libhipcub-dev aria2
+
+# Copy rocWMMA internal headers if needed by your ROCm version:
 git clone --depth 1 --branch rocm-7.2.3 https://github.com/ROCm/rocWMMA.git /tmp/rocWMMA
 sudo cp -a /tmp/rocWMMA/library/include/rocwmma /usr/local/include/
 ```
 
-### 3. Build
+### 4. Build for Strix Halo (`gfx1151`)
 
 ```sh
-make strix-halo -j"$(nproc)"      # builds ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent for gfx1151
+make strix-halo -j"$(nproc)"
 ```
 
-### 4. Check the hardware (no model needed)
+This compiles `ds4`, `ds4-server`, `ds4-bench`, `ds4-eval`, and `ds4-agent` specifically for the `gfx1151` (Radeon 8060S) architecture.
+
+### 5. Verify Hardware & TTM Limit
 
 ```sh
-make rocm-diag
+make rocm-doctor
 ```
 
-On a healthy machine you'll see `gcnArchName=gfx1151` and a TTM/GTT limit near
-your RAM size. On a misconfigured one you'll get a `WARNING` plus a
-`SUGGESTED: sudo amd-ttm --set-pages ...` line.
-
-### 5. Fix the GTT limit (if warned)
+Confirm `gcnArchName=gfx1151` and that your TTM/GTT limit is near 120 GiB. If a warning is printed, raise the limit:
 
 ```sh
-sudo amd-ttm --set-pages 8126464     # 8126464 * 4 KiB ≈ 31 GiB; pick ~90% of your RAM
-# or, for a single run without touching the system:
-DS4_ROCM_TTM_PAGES=8126464 ./ds4 -m your-model.gguf
+sudo amd-ttm --set-pages 8126464
 ```
 
-Re-run `make rocm-diag` to confirm the limit rose and the warning is gone.
+---
 
-### 6. Run the smoke and quick-bench tests
+## Downloading & Running the Model
+
+### 1. Download the `tekosML` 0731 GGUF Model (**86.72 GB**)
+
+Use 16-connection parallel `aria2c` for fast download (~110 MB/s):
 
 ```sh
-make rocm-smoke            # allocation/copy/mapping + optional real-model gate
-make rocm-bench-quick      # confirms gfx1151 kernels execute; prints bandwidth
+cd /home/user/source/ds4-strix-halo
+mkdir -p gguf
+aria2c -x 16 -s 16 -k 1M -j 16 -c --file-allocation=none \
+  -d gguf -o DeepSeek-V4-Flash-0731-IQ2XXS-STRIX.gguf \
+  "https://huggingface.co/tekosML/DeepSeek-V4-Flash-0731-GGUF-GX10/resolve/main/DeepSeek-V4-Flash-0731-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf"
 ```
 
-Both should print `PASSED`. To make CI fail on any config warning:
+### 2. Set Up the Symlink
 
 ```sh
-ROCM_SMOKE_STRICT=1 make rocm-smoke
+ln -sf gguf/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX.gguf ds4flash.gguf
 ```
 
-### 7. Run a model
+### 3. Run Interactive CLI Inference
 
 ```sh
-./download_model.sh                       # or drop in your own GGUF
-./ds4-server ds4flash.gguf                # HTTP server
-# or
-./ds4 ds4flash.gguf                       # interactive CLI
+DS4_ROCM_STREAM_MODEL_CACHE_GB=48 ./ds4 -m ds4flash.gguf -c 512 \
+  --ssd-streaming --ssd-streaming-cache-experts 32GB \
+  -p "What is the capital of France?" --think --tokens 60
 ```
 
-If the model is larger than the GTT-mapped memory allows, use upstream SSD
-streaming:
+### 4. Run OpenAI-Compatible HTTP Server (`ds4-server`)
 
 ```sh
-./ds4 --ssd-streaming -m your-large-model.gguf
+DS4_ROCM_STREAM_MODEL_CACHE_GB=48 ./ds4-server -m ds4flash.gguf -c 8192 \
+  --port 8000 --ssd-streaming --ssd-streaming-cache-experts 32GB
 ```
 
-### 8. Capture a report for help/CI
+Send a completion request to `http://127.0.0.1:8000/v1/chat/completions`:
 
-```sh
-DS4_ROCM_DIAG=./diag.txt DS4_ROCM_DIAG_JSON=1 ./ds4 -m ds4flash.gguf
-cat ./diag.txt          # machine-readable profile (JSON), attach to issues
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ds4flash",
+    "messages": [
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "temperature": 0.6,
+    "max_tokens": 512
+  }'
 ```
 
-</details>
+---
 
-## How it works
-
-Strix Halo is a **unified-memory** part: the CPU and GPU share one physical RAM
-pool, and the GPU reaches that memory through a **TTM/GTT** mapping limit rather
-than a fixed VRAM allocation. The single biggest source of "it won't load my
-model" or "it OOMs" problems on this hardware is a GTT limit that is too small
-relative to RAM — usually caused by an oversized BIOS dedicated-VRAM carveout.
-
-This fork adds a small, ROCm-only diagnostics layer that runs at startup
-(`ds4_gpu_init`) and answers three questions:
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  1. Is this the right hardware/driver?                             │
-│     → gfx1151 arch, HIP/ROCm versions, memory capabilities         │
-│                                                                     │
-│  2. Is there enough mapped memory?                                  │
-│     → reads TTM/GTT pages_limit, compares to RAM, warns if < 75%   │
-│     → cross-checks amdgpu.gttsize boot param vs live limit          │
-│                                                                     │
-│  3. What is the exact fix?                                          │
-│     → prints: sudo amd-ttm --set-pages <N>                         │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-All diagnostics are **advisory** — they print to stderr and never alter inference.
-Two escape hatches let you act on them:
-
-- `DS4_ROCM_TTM_PAGES` — override the limit for a single run
-- `DS4_ROCM_TTM_AUTORAISE=1` — let the engine call `amd-ttm` itself (as root)
-
-## DeepSeek V4 Flash model sizes
-
-This fork targets **128 GB Strix Halo** systems running **DeepSeek V4 Flash** (including the new **DeepSeek-V4-Flash-0731** release). After a 512 MB BIOS VRAM carveout, expect ~120 GiB usable RAM.
-
-| Model / Quant | Size | Fits in 120 GiB? | Speed | Notes |
-|---------------|------|:-----------------:|-------|-------|
-| DeepSeek-V4-Flash-0731 (ROCmFP2) | ~98 GB | :white_check_mark: | **32.0 t/s** | **July 31 official release** (TerminalBench 82.7, DeepSWE 54.4) |
-| ROCmFPX STRIX (284B) | ~102 GB | :white_check_mark: | **32.0 t/s** | **High-throughput LocalMaxxing route** (with DSpark draft) |
-| UD-IQ2_XXS | ~91 GB | :white_check_mark: | ~13 t/s | Capacity proof route |
-| IQ2_XXS | ~100 GB | :white_check_mark: | ~12 t/s | Low quality |
-| UD-Q2_K | ~110 GB | :warning: | ~10 t/s | May need SSD streaming |
-| Q4_K_M | ~200 GB | :x: | — | Requires multi-GPU or SSD streaming |
-
-### Quantizing the New DeepSeek-V4-Flash-0731 (July 31 Release)
-
-To quantize the newly released **DeepSeek-V4-Flash-0731** to ROCmFP2 (`Q2_0_ROCMFPX` ~98 GB):
-
-```sh
-# One-shot conversion and quantization script
-./download_model.sh v4-flash-0731
-```
-
-Or run manually via ROCmFPX:
-```sh
-# Convert HF safetensors to GGUF using ROCmFPX converter
-python3 ../ROCmFPX/scripts/convert_deepseek_v4_modular.py \
-  ~/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/9e165c30e2704aec5d9d593cce3eebd58bbef1cb \
-  --outfile gguf/DeepSeek-V4-Flash-0731-BF16.gguf --deepseek4-include-mtp
-
-# Quantize to ROCmFP2 (Q2_0_ROCMFPX) ~98 GB
-../ROCmFPX/build-strix-rocmfp4/bin/llama-quantize \
-  gguf/DeepSeek-V4-Flash-0731-BF16.gguf \
-  gguf/DeepSeek-V4-Flash-0731-ROCMFP2-STRIX.gguf Q2_0_ROCMFPX
-```
-
-Check fit before loading:
-
-```sh
-make rocm-model-fit DS4_TEST_MODEL=your.gguf
-```
-
-## BIOS guidance
-
-Strix Halo uses unified physical memory. A large BIOS dedicated-VRAM carveout
-**permanently removes RAM from the operating system** and helps compute very
-little. AMD recommends a small reservation, preferably **512 MB**, and a larger
-dynamic **TTM/GTT** mapping limit instead.
-
-```sh
-cat /sys/module/ttm/parameters/pages_limit      # check current limit
-```
-
-GTT is a **dynamic mapping limit**, not permanently reserved memory. Raise it
-with AMD's `amd-ttm` helper (preferred) or a kernel parameter as a fallback.
-See [STRIXHALO.md](STRIXHALO.md).
-
-## Performance tuning
-
-The one-shot setup script applies the `accelerator-performance` tuned profile.
-To verify or re-apply manually:
-
-```sh
-sudo systemctl enable --now tuned
-sudo tuned-adm profile accelerator-performance
-tuned-adm active   # should show accelerator-performance
-```
-
-Key parameters:
-- **GRUB**: `amdgpu.gttsize=<MiB> ttm.pages_limit=<4KiB-pages> ttm.page_pool_size=<4KiB-pages> amdgpu.cwsr_enable=0`
-- **modprobe.d**: `/etc/modprobe.d/amdgpu_strix_halo.conf` (same values)
-- **udev**: `/etc/udev/rules.d/99-amd-kfd.rules` (render group access)
-- **Groups**: user must be in `render` and `video` groups
-
-## Environment variables
+## Troubleshooting & Environment Variables
 
 | Variable | Description |
-|----------|-------------|
-| `DS4_ROCM_TTM_PAGES` | Override TTM/GTT limit in 4 KiB pages (e.g. `8126464` ≈ 31 GiB) |
-| `DS4_ROCM_TTM_AUTORAISE` | Auto-raise limit via `amd-ttm` when model wouldn't fit (requires root) |
-| `DS4_ROCM_AUTO_RAISE_ONCE` | Bound autoraise to one call per process |
-| `DS4_ROCM_DIAG` | Write startup profile to file (key=value) |
-| `DS4_ROCM_DIAG_JSON` | Write diag as JSON instead of key=value |
-| `DS4_ROCM_DIAG_FIELDS` | `basic` \| `full` (default) \| `all` |
-| `DS4_TEST_MODEL` | GGUF path for `make rocm-smoke` model gate |
-| `ROCM_SMOKE_STRICT` | Fail smoke/CI on any config warning |
+| :--- | :--- |
+| `DS4_ROCM_STREAM_MODEL_CACHE_GB` | Set GPU device model cache size in GiB (default: `48` for 128 GB systems) |
+| `DS4_ROCM_TTM_PAGES` | Override TTM/GTT mapping limit in 4 KiB pages |
+| `DS4_ROCM_TTM_AUTORAISE` | Auto-raise TTM limit via `amd-ttm` on startup (requires root) |
+| `ROCM_SMOKE_STRICT` | Fail smoke tests and CI on any hardware warning |
 
-## Troubleshooting
+| Common Issue | Cause & Solution |
+| :--- | :--- |
+| **`raw KV batch store failed`** | VRAM exhausted when loading without `--ssd-streaming`. Set `DS4_ROCM_STREAM_MODEL_CACHE_GB=48` and pass `--ssd-streaming`. |
+| **`pageable-memory access disabled`** | Raise TTM limit via `sudo amd-ttm --set-pages 8126464` or `DS4_ROCM_TTM_AUTORAISE=1`. |
+| **Garbage output text** | Ensure you pass `--think` for reasoning mode or set `temperature=0.6` in API requests so DeepSeek V4 reasoning formatting is followed. |
 
-| Problem | Fix |
-|---------|-----|
-| Low visible memory / OOM | Raise TTM/GTT limit; keep BIOS VRAM carveout at 512 MB |
-| Missing `gfx1151` | Build with `make strix-halo`; verify ROCm supports gfx1151 |
-| rocWMMA issues | Ensure ROCm 7.2.x + matching `rocwmma` package installed |
-| Driver/KFD errors | Use Ubuntu 24.04 HWE kernel (6.18.4+) with KFD fixes |
-
-## Syncing upstream
-
-This fork stays close to [antirez/ds4](https://github.com/antirez/ds4):
-
-```sh
-git fetch upstream
-git merge upstream/main          # or rebase your Strix Halo work on top
-```
-
-Preferred policy: keep Strix Halo additions confined to `rocm/`, `ds4_rocm.h`,
-`tests/rocm_smoke.c`, the `Makefile` ROCm targets, and this repository's docs.
-Do **not** reintroduce the old `ds4fa` backend or RPC implementation. See
-[FORK_NOTES.md](FORK_NOTES.md).
+---
 
 ## Documentation
 
 | Document | Description |
-|----------|-------------|
+| :--- | :--- |
 | [STRIXHALO.md](STRIXHALO.md) | ROCm install, GRUB params, TTM priority, hardware notes |
 | [FORK_NOTES.md](FORK_NOTES.md) | Audit of what was retained/rejected from upstream |
 
+---
+
 ## License
 
-This project is a fork of [antirez/ds4](https://github.com/antirez/ds4), which
-in turn builds on the path opened by [llama.cpp / GGML](https://github.com/ggml-org/llama.cpp).
-See the upstream `README.md` and `LICENSE` for full acknowledgements and the
-MIT license terms.
+This project is a fork of [antirez/ds4](https://github.com/antirez/ds4). See `LICENSE` for terms.
