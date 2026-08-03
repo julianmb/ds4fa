@@ -82,6 +82,92 @@ __global__ static void embed_tokens_hc_kernel(
     out[gid] = __half2float(w[(uint64_t)tok * n_embd + d]);
 }
 
+__global__ static void embed_token_hc_q4_k_kernel(
+        float *out,
+        const unsigned char *w,
+        uint32_t token,
+        uint32_t n_embd,
+        uint32_t n_hc) {
+    uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t n = (uint64_t)n_embd * n_hc;
+    if (gid >= n) return;
+    const uint32_t d = gid % n_embd;
+    const uint32_t nb = (n_embd + 255u) / 256u;
+    const uint32_t ib = d / 256u;
+    const uint32_t iq = d % 256u;
+
+    const unsigned char *blk = w + ((uint64_t)token * nb + ib) * 144u;
+    const float d_scale = __half2float(__ushort_as_half(*(const unsigned short *)blk));
+    const float dmin = __half2float(__ushort_as_half(*(const unsigned short *)(blk + 2u)));
+    const unsigned char *scales = blk + 4u;
+    const unsigned char *qs = blk + 16u;
+
+    const uint32_t j = iq / 32u;
+    const uint32_t l = iq % 32u;
+
+    uint8_t sc, m;
+    if (j < 4u) {
+        sc = scales[j] & 63u;
+        m = scales[j + 4u] & 63u;
+    } else {
+        sc = (scales[j + 4u] & 0x0fu) | ((scales[j - 4u] >> 6u) << 4u);
+        m = (scales[j + 4u] >> 4u) | ((scales[j] >> 6u) << 4u);
+    }
+
+    const uint32_t byte_off = (j >> 1u) * 32u + l;
+    const int shift = (j & 1u) ? 4 : 0;
+    const int q = (qs[byte_off] >> shift) & 0x0f;
+
+    out[gid] = d_scale * (float)sc * (float)q - dmin * (float)m;
+}
+
+__global__ static void embed_tokens_hc_q4_k_kernel(
+        float *out,
+        const int32_t *tokens,
+        const unsigned char *w,
+        uint32_t n_vocab,
+        uint32_t n_tokens,
+        uint32_t n_embd,
+        uint32_t n_hc) {
+    uint64_t gid = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    uint64_t n = (uint64_t)n_tokens * n_hc * n_embd;
+    if (gid >= n) return;
+    const uint32_t d = gid % n_embd;
+    uint64_t tmp = gid / n_embd;
+    const uint32_t t = tmp / n_hc;
+    int32_t tok_i = tokens[t];
+    uint32_t tok = tok_i < 0 ? 0u : (uint32_t)tok_i;
+    if (tok >= n_vocab) tok = 0;
+
+    const uint32_t nb = (n_embd + 255u) / 256u;
+    const uint32_t ib = d / 256u;
+    const uint32_t iq = d % 256u;
+
+    const unsigned char *blk = w + ((uint64_t)tok * nb + ib) * 144u;
+    const float d_scale = __half2float(__ushort_as_half(*(const unsigned short *)blk));
+    const float dmin = __half2float(__ushort_as_half(*(const unsigned short *)(blk + 2u)));
+    const unsigned char *scales = blk + 4u;
+    const unsigned char *qs = blk + 16u;
+
+    const uint32_t j = iq / 32u;
+    const uint32_t l = iq % 32u;
+
+    uint8_t sc, m;
+    if (j < 4u) {
+        sc = scales[j] & 63u;
+        m = scales[j + 4u] & 63u;
+    } else {
+        sc = (scales[j + 4u] & 0x0fu) | ((scales[j - 4u] >> 6u) << 4u);
+        m = (scales[j + 4u] >> 4u) | ((scales[j] >> 6u) << 4u);
+    }
+
+    const uint32_t byte_off = (j >> 1u) * 32u + l;
+    const int shift = (j & 1u) ? 4 : 0;
+    const int q = (qs[byte_off] >> shift) & 0x0f;
+
+    out[gid] = d_scale * (float)sc * (float)q - dmin * (float)m;
+}
+
 __device__ static float warp_sum_f32(float v);
 
 __global__ static void matmul_f16_kernel(
@@ -142,6 +228,134 @@ __global__ static void matmul_f16_ordered_chunks_kernel(
         for (uint32_t i = 0; i < 32u; i++) total += partial[i];
         out[tok * out_dim + row] = total;
     }
+}
+
+__global__ static void matmul_bf16_ordered_chunks_kernel(
+        float *out,
+        const unsigned short *w,
+        const float *x,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t n_tok) {
+    uint64_t row = (uint64_t)blockIdx.x;
+    uint64_t tok = (uint64_t)blockIdx.y;
+    if (row >= out_dim || tok >= n_tok) return;
+
+    __shared__ float partial[32];
+    const uint32_t tid = threadIdx.x;
+    float sum = 0.0f;
+    const uint64_t chunk = (in_dim + 31u) / 32u;
+    const uint64_t k0 = (uint64_t)tid * chunk;
+    uint64_t k1 = k0 + chunk;
+    if (k1 > in_dim) k1 = in_dim;
+    const unsigned short *wr = w + row * in_dim;
+    const float *xr = x + tok * in_dim;
+    for (uint64_t i = k0; i < k1; i++) {
+        uint32_t bits = (uint32_t)wr[i] << 16u;
+        union { uint32_t u; float f; } cv;
+        cv.u = bits;
+        sum += cv.f * xr[i];
+    }
+    partial[tid] = sum;
+    __syncthreads();
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint32_t i = 0; i < 32u; i++) total += partial[i];
+        out[tok * out_dim + row] = total;
+    }
+}
+
+/* Q4_K blocks are 144 bytes: f16 d, f16 dmin, 12 scale bytes, 128 q4 bytes.
+ * Per 32-value group j (0..7): sc/m from q4_k_get_scale_min; qs byte offset
+ * (j>>1)*32 with nibble shift (j&1)*4; value = d*sc*q - dmin*m. */
+__global__ static void matmul_q4_k_f32_sharedx_warp_rows_w32_kernel(
+        float *out,
+        const unsigned char *w,
+        const float *x,
+        uint32_t n_blocks,
+        uint64_t out_dim,
+        uint64_t row_bytes) {
+    extern __shared__ float shx[];
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t wave = tid >> 5u;
+    const uint32_t rows_per_block = blockDim.x >> 5u;
+    const uint32_t in_dim = n_blocks << 8u;
+    for (uint32_t i = tid; i < in_dim; i += blockDim.x) shx[i] = x[i];
+    __syncthreads();
+
+    const uint64_t row = (uint64_t)blockIdx.x * rows_per_block + wave;
+    if (row >= out_dim) return;
+    const unsigned char *wr = w + row * row_bytes;
+    float acc = 0.0f;
+    for (uint32_t b = 0; b < n_blocks; b++) {
+        const unsigned char *blk = wr + (uint64_t)b * 144u;
+        const float d = __half2float(__ushort_as_half(*(const unsigned short *)blk));
+        const float dmin = __half2float(__ushort_as_half(*(const unsigned short *)(blk + 2u)));
+        const unsigned char *scales = blk + 4u;
+        const unsigned char *qs = blk + 16u;
+        for (uint32_t j = 0; j < 8u; j++) {
+            uint8_t sc, m;
+            if (j < 4u) {
+                sc = scales[j] & 63u;
+                m = scales[j + 4u] & 63u;
+            } else {
+                sc = (scales[j + 4u] & 0x0fu) | ((scales[j - 4u] >> 6u) << 4u);
+                m = (scales[j + 4u] >> 4u) | ((scales[j] >> 6u) << 4u);
+            }
+            const uint32_t byte_off = (j >> 1u) * 32u + lane;
+            const int shift = (j & 1u) ? 4 : 0;
+            const int q = (qs[byte_off] >> shift) & 0x0f;
+            acc += (d * (float)sc * (float)q - dmin * (float)m) *
+                   shx[(b << 8u) + (j << 5u) + lane];
+        }
+    }
+    acc = warp_sum_f32(acc);
+    if (lane == 0u) out[row] = acc;
+}
+
+__global__ static void matmul_q4_k_f32_batch_warp8_kernel(
+        float *out,
+        const unsigned char *w,
+        const float *x,
+        uint32_t n_blocks,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        uint64_t n_tok,
+        uint64_t row_bytes) {
+    const uint64_t row = (uint64_t)blockIdx.x * 8u + (threadIdx.x >> 5u);
+    const uint64_t tok = (uint64_t)blockIdx.y;
+    const uint32_t lane = threadIdx.x & 31u;
+    if (row >= out_dim || tok >= n_tok) return;
+    const unsigned char *wr = w + row * row_bytes;
+    const float *xr = x + tok * in_dim;
+    float acc = 0.0f;
+    for (uint32_t b = 0; b < n_blocks; b++) {
+        const unsigned char *blk = wr + (uint64_t)b * 144u;
+        const float d = __half2float(__ushort_as_half(*(const unsigned short *)blk));
+        const float dmin = __half2float(__ushort_as_half(*(const unsigned short *)(blk + 2u)));
+        const unsigned char *scales = blk + 4u;
+        const unsigned char *qs = blk + 16u;
+        for (uint32_t j = 0; j < 8u; j++) {
+            uint8_t sc, m;
+            if (j < 4u) {
+                sc = scales[j] & 63u;
+                m = scales[j + 4u] & 63u;
+            } else {
+                sc = (scales[j + 4u] & 0x0fu) | ((scales[j - 4u] >> 6u) << 4u);
+                m = (scales[j + 4u] >> 4u) | ((scales[j] >> 6u) << 4u);
+            }
+            const uint64_t i = (uint64_t)b * 256u + (uint64_t)j * 32u + lane;
+            if (i < in_dim) {
+                const uint32_t byte_off = (j >> 1u) * 32u + lane;
+                const int shift = (j & 1u) ? 4 : 0;
+                const int q = (qs[byte_off] >> shift) & 0x0f;
+                acc += (d * (float)sc * (float)q - dmin * (float)m) * xr[i];
+            }
+        }
+    }
+    acc = warp_sum_f32(acc);
+    if (lane == 0u) out[tok * out_dim + row] = acc;
 }
 
 __global__ static void matmul_f16_f32_sharedx_warp_rows_w32_kernel(

@@ -14,8 +14,6 @@ DRAFT="${ROOT}/gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf"
 MODE="server"
 PORT="8000"
 CTX="8192"
-TOP_K="4"
-PREFILL="sparse"
 
 usage() {
     cat <<EOF
@@ -29,10 +27,8 @@ Options:
   --cli              Run ds4 interactive CLI
   --model PATH       Path to target GGUF (default: gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf)
   --draft PATH       Path to DSpark draft GGUF (default: gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf)
-  --top-k N          Number of active experts (default: 4 for speed, 6 for default quality)
   --ctx N            Context window size (default: 8192)
   --port N           HTTP server port (default: 8000)
-  --prefill MODE     Prefill mode: sparse (default, ~250 tok/s) or exact
   --help             Show this message
 
 EOF
@@ -44,10 +40,8 @@ while [ $# -gt 0 ]; do
         --cli) MODE="cli" ;;
         --model) shift; MODEL="$1" ;;
         --draft) shift; DRAFT="$1" ;;
-        --top-k) shift; TOP_K="$1" ;;
         --ctx) shift; CTX="$1" ;;
         --port) shift; PORT="$1" ;;
-        --prefill) shift; PREFILL="$1" ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -61,10 +55,7 @@ if [ ! -f "$MODEL" ]; then
     exit 1
 fi
 
-# Safety Step 1: Enforce 115 GB virtual memory cap to protect kernel/amdgpu driver
-ulimit -v 123480320 2>/dev/null || true
-
-# Safety Step 2: Auto-verify model fit before loading
+# Safety Step 1: Check model fit before loading
 echo "Checking model fit for $MODEL..."
 if ! "${ROOT}/tests/rocm_model_fit" "$MODEL" >/dev/null 2>&1; then
     echo "Warning: Model size exceeds safe TTM/GTT limits!" >&2
@@ -82,30 +73,25 @@ export DFLASH_DS4_SPEC=1
 export DFLASH_DS4_FUSED_VERIFY=1
 export DFLASH_DS4_SPEC_Q=4
 export LUCE_MMVQ_MAX_NCOLS=4
+export DS4_ROCM_STREAM_MODEL_CACHE_GB=48
 
 if [ -f "$DRAFT" ]; then
     export DFLASH_DS4_DRAFT="$DRAFT"
-    DRAFT_ARG="--ds4-draft $DRAFT"
 else
     echo "Note: DSpark draft not found at $DRAFT (download with ./download_model.sh dspark-drafter for +26% decode speed)" >&2
-    DRAFT_ARG=""
 fi
 
 if [ "$MODE" = "server" ]; then
-    echo "Starting ds4-server on http://127.0.0.1:${PORT} (top-k=${TOP_K} experts, prefill=${PREFILL})..."
+    echo "Starting ds4-server on http://127.0.0.1:${PORT}..."
     exec "${ROOT}/ds4-server" -m "$MODEL" \
-        $DRAFT_ARG \
-        --ds4-prefill "$PREFILL" \
-        --ds4-fused-decode \
-        --ds4-expert-top-k "$TOP_K" \
-        --max-ctx "$CTX" \
-        --port "$PORT"
+        -c "$CTX" \
+        --port "$PORT" \
+        --ssd-streaming \
+        --ssd-streaming-cache-experts 48GB
 else
     echo "Starting ds4 interactive CLI..."
     exec "${ROOT}/ds4" -m "$MODEL" \
-        $DRAFT_ARG \
-        --ds4-prefill "$PREFILL" \
-        --ds4-fused-decode \
-        --ds4-expert-top-k "$TOP_K" \
-        --max-ctx "$CTX"
+        -c "$CTX" \
+        --ssd-streaming \
+        --ssd-streaming-cache-experts 48GB
 fi

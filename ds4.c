@@ -2035,6 +2035,7 @@ static const gguf_type_info gguf_types[] = {
     [28] = {"f64",      1,   8},
     [29] = {"iq1_m",  256,  56},
     [30] = {"bf16",     1,   2},
+    [39] = {"iq2_m",   256,  70},
 };
 
 enum {
@@ -4485,13 +4486,16 @@ static bool ds4_streaming_routed_expert_bytes(
     if (per_expert_bytes_out) *per_expert_bytes_out = 0;
     if (!weights || !per_expert_bytes_out) return false;
 
+    uint64_t max_bytes = 0;
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
-        if (streaming_layer_routed_expert_bytes(&weights->layer[il],
-                                                per_expert_bytes_out)) {
-            return true;
+        uint64_t bytes = 0;
+        if (streaming_layer_routed_expert_bytes(&weights->layer[il], &bytes)) {
+            if (bytes > max_bytes) max_bytes = bytes;
         }
     }
-    return false;
+    if (max_bytes == 0) return false;
+    *per_expert_bytes_out = max_bytes;
+    return true;
 }
 
 enum { DS4_STREAMING_PREFILL_HEADROOM_LAYERS = 2 };
@@ -4559,7 +4563,7 @@ static DS4_MAYBE_UNUSED bool weights_streaming_layer_experts_uniform(
     const ds4_layer_weights *l = &w->layer[il];
     if (!streaming_layer_routed_expert_bytes(l, &bytes)) return true;
     if (!ds4_streaming_routed_expert_bytes(w, &base)) return true;
-    return bytes == base;
+    return bytes <= base;
 }
 
 static uint32_t ds4_streaming_cache_experts_for_byte_budget(
@@ -6641,6 +6645,44 @@ static void embed_token_q8_0(const ds4_model *m, const ds4_weights *w, int token
     }
 }
 
+static void embed_token_q4_k(const ds4_model *m, const ds4_weights *w, int token, float *out) {
+    ds4_tensor *te = w->token_embd;
+    if (te->type != DS4_TENSOR_Q4_K || te->ndim != 2) {
+        ds4_die("expected a 2D Q4_K token embedding tensor");
+    }
+    if (token < 0 || (uint64_t)token >= te->dim[1]) {
+        ds4_die("token id is outside the embedding table");
+    }
+
+    const uint64_t n = te->dim[0];
+    const uint64_t nb = (n + QK_K - 1) / QK_K;
+    const block_q4_K *row = (const block_q4_K *)tensor_data(m, te) + (uint64_t)token * nb;
+
+    for (uint64_t i = 0; i < nb; i++) {
+        const float d = f16_to_f32(row[i].d);
+        const float dmin = f16_to_f32(row[i].dmin);
+        const uint8_t *qs = row[i].qs;
+        const uint8_t *scales = row[i].scales;
+        float *out_block = out + i * QK_K;
+
+        for (int j = 0; j < QK_K / 32; j++) {
+            uint8_t sc_val, m_val;
+            q4_k_get_scale_min(j, scales, &sc_val, &m_val);
+
+            const int byte_off = (j >> 1) * 32;
+            const int shift = (j & 1) * 4;
+            const float scale = d * (float)sc_val;
+            const float minv = dmin * (float)m_val;
+            for (int l = 0; l < 32; l++) {
+                if (j * 32 + l < (int)(n - i * QK_K)) {
+                    const int q = (qs[byte_off + l] >> shift) & 0x0F;
+                    out_block[j * 32 + l] = scale * (float)q - minv;
+                }
+            }
+        }
+    }
+}
+
 static void embed_token_any(const ds4_model *m, const ds4_weights *w, int token, float *out) {
     if (!w->token_embd) ds4_die("token embedding tensor is missing");
     switch (w->token_embd->type) {
@@ -6649,6 +6691,9 @@ static void embed_token_any(const ds4_model *m, const ds4_weights *w, int token,
         break;
     case DS4_TENSOR_Q8_0:
         embed_token_q8_0(m, w, token, out);
+        break;
+    case DS4_TENSOR_Q4_K:
+        embed_token_q4_k(m, w, token, out);
         break;
     default:
         ds4_die("unsupported token embedding tensor type");
@@ -13613,7 +13658,7 @@ static void forward_token_raw_swa_cpu_decode_scratch(
     float *cur = scratch->cur;
     float *next = scratch->next;
 
-    embed_token_f16(model, weights, token, scratch->plain);
+    embed_token_any(model, weights, token, scratch->plain);
     hc_from_plain_embedding(cur, scratch->plain, DS4_N_EMBD, DS4_N_HC);
 
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -13688,7 +13733,7 @@ static void prefill_layer_major_cpu(
     }
 
     for (uint64_t t = 0; t < n_tok; t++) {
-        embed_token_f16(model, weights, prompt->v[t], plain);
+        embed_token_any(model, weights, prompt->v[t], plain);
         hc_from_plain_embedding(cur + t * hc_dim, plain, DS4_N_EMBD, DS4_N_HC);
     }
 
@@ -13885,7 +13930,7 @@ static void forward_first_token_cpu(
     float *cur = xmalloc((size_t)DS4_N_HC * DS4_N_EMBD * sizeof(cur[0]));
     float *next = xmalloc((size_t)DS4_N_HC * DS4_N_EMBD * sizeof(next[0]));
 
-    embed_token_f16(model, weights, token, plain);
+    embed_token_any(model, weights, token, plain);
     hc_from_plain_embedding(cur, plain, DS4_N_EMBD, DS4_N_HC);
 
     for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
@@ -22757,6 +22802,7 @@ static bool metal_graph_encode_decode_layer_phase(
     }
     DS4_METAL_PROFILE_DECODE_STAGE("router");
     if (ok) ok = metal_graph_profile_router_selection(g, layer, il, pos);
+    if (!ok) fprintf(stderr, "ds4: DBG layer %u router_selection failed\n", il);
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_logits", metal_graph_router_logits(g), DS4_N_EXPERT, il, pos);
         metal_graph_debug_dump_tensor("ffn_moe_probs", metal_graph_router_probs(g), DS4_N_EXPERT, il, pos);
@@ -23252,14 +23298,17 @@ static bool metal_graph_encode_decode_layer_phase(
         layer->ffn_gate_tid2eid == NULL &&
         getenv("DS4_MOE_REPLAY_SELECTED_IDS") == NULL;
     if (cuda_stream_selected_load) {
+        fprintf(stderr, "ds4: DBG layer %u entering cuda_stream_selected_load\n", il);
         ok = metal_graph_decode_cuda_selected_load(g,
                                                    model,
                                                    layer,
                                                    il,
                                                    gate_expert_bytes,
                                                    down_expert_bytes);
+        if (!ok) fprintf(stderr, "ds4: DBG layer %u cuda_selected_load failed\n", il);
     }
     if (selected_readahead_shared_delay) {
+        fprintf(stderr, "ds4: DBG layer %u entering selected_readahead_shared_delay\n", il);
         if (ok) {
             ok = metal_graph_decode_selected_readahead_override(g,
                                                                 model,
@@ -23267,6 +23316,7 @@ static bool metal_graph_encode_decode_layer_phase(
                                                                 il,
                                                                 gate_expert_bytes,
                                                                 down_expert_bytes);
+            if (!ok) fprintf(stderr, "ds4: DBG layer %u readahead_override failed\n", il);
         }
         if (ok && fuse_shared_gate_up) {
             ok = ds4_gpu_shared_gate_up_swiglu_q8_0_tensor(metal_graph_shared_gate(g),
@@ -23394,8 +23444,10 @@ static bool metal_graph_encode_decode_layer_phase(
         return ok;
     }
     if (overlap_selected_shared) {
+        fprintf(stderr, "ds4: DBG layer %u entering overlap_selected_shared\n", il);
         uint64_t selected_event = 0;
         if (ok) ok = ds4_gpu_signal_selected_readback_ready(&selected_event) != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG layer %u signal_selected_readback failed\n", il);
         metal_graph_selected_async_load async_load = {0};
         bool async_load_started = false;
         const bool async_early_commit =
@@ -23619,6 +23671,8 @@ static bool metal_graph_encode_decode_layer_phase(
                                                  NULL,
                                                  il,
                                                  false) != 0;
+    fprintf(stderr, "ds4: DBG layer %u default routed_moe_one ok=%d gate_type=%d down_type=%d\n",
+            il, (int)ok, (int)layer->ffn_gate_exps->type, (int)layer->ffn_down_exps->type);
     DS4_METAL_PROFILE_DECODE_STAGE("routed_moe");
     if (ok) {
         metal_graph_debug_dump_tensor("ffn_moe_gate_clamped", metal_graph_routed_gate(g),
@@ -23990,6 +24044,7 @@ static bool metal_graph_encode_output_head(
         } \
     } while (0)
     bool ok = ds4_gpu_rms_norm_plain_tensor(metal_graph_flat_hc(g), metal_graph_cur_hc(g), (uint32_t)hc_dim, DS4_RMS_EPS) != 0;
+    if (!ok) fprintf(stderr, "ds4: DBG head stage rms_norm_plain failed\n");
     DS4_METAL_PROFILE_OUTPUT_STAGE("hc_flat_norm");
     if (ok) ok = ds4_gpu_matmul_f16_tensor(metal_graph_output_pre(g),
                                              model->map,
@@ -23999,6 +24054,7 @@ static bool metal_graph_encode_output_head(
                                              DS4_N_HC,
                                              metal_graph_flat_hc(g),
                                              1) != 0;
+    if (!ok) fprintf(stderr, "ds4: DBG head stage matmul_f16 output_hc_fn failed (type=%d)\n", (int)weights->output_hc_fn->type);
     DS4_METAL_PROFILE_OUTPUT_STAGE("hc_pre");
     if (ok) {
         metal_graph_debug_dump_tensor("result_hc_pre", metal_graph_output_pre(g), DS4_N_HC, DS4_N_LAYER, 0);
@@ -24011,6 +24067,7 @@ static bool metal_graph_encode_output_head(
                                                     weights->output_hc_base->abs_offset,
                                                     DS4_N_HC,
                                                     DS4_HC_EPS) != 0;
+    if (!ok) fprintf(stderr, "ds4: DBG head stage output_hc_weights failed\n");
     DS4_METAL_PROFILE_OUTPUT_STAGE("hc_weights");
     if (ok) {
         metal_graph_debug_dump_tensor("result_hc_weights", metal_graph_output_weights(g), DS4_N_HC, DS4_N_LAYER, 0);
@@ -24042,6 +24099,7 @@ static bool metal_graph_encode_output_head(
                                               metal_graph_output_weights(g),
                                               DS4_N_EMBD,
                                               DS4_N_HC) != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG head stage hc_weighted_sum failed\n");
     }
     DS4_METAL_PROFILE_OUTPUT_STAGE("hc_weighted_sum");
     if (ok) {
@@ -24055,6 +24113,7 @@ static bool metal_graph_encode_output_head(
                                               weights->output_norm->abs_offset,
                                               DS4_N_EMBD,
                                               DS4_RMS_EPS) != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG head stage rms_norm_weight failed\n");
     }
     DS4_METAL_PROFILE_OUTPUT_STAGE("output_norm");
     if (ok) {
@@ -24091,6 +24150,12 @@ static bool metal_graph_encode_output_head(
                                                    vocab_dim,
                                                    metal_graph_output_norm(g),
                                                    1);
+        if (!ok) {
+            fprintf(stderr, "ds4: DBG dense quant output matmul failed (type=%d in=%llu out=%llu)\n",
+                    (int)weights->output->type,
+                    (unsigned long long)DS4_N_EMBD,
+                    (unsigned long long)vocab_dim);
+        }
     }
     if (ok) {
         metal_graph_debug_dump_tensor("result_output", metal_graph_logits(g), vocab_dim, DS4_N_LAYER, 0);
@@ -24601,6 +24666,10 @@ static bool metal_graph_matmul_plain_tensor(
     if (w->type == DS4_TENSOR_F16) {
         return ds4_gpu_matmul_f16_tensor(out, model->map, model->size,
                                            w->abs_offset, in_dim, out_dim, x, n_tok) != 0;
+    }
+    if (w->type == DS4_TENSOR_BF16) {
+        return ds4_gpu_matmul_bf16_tensor(out, model->map, model->size,
+                                            w->abs_offset, in_dim, out_dim, x, n_tok) != 0;
     }
     if (w->type == DS4_TENSOR_F32) {
         return ds4_gpu_matmul_f32_tensor(out, model->map, model->size,
@@ -25289,7 +25358,7 @@ static int metal_graph_decode_test(
     int selected[DS4_MAX_EXPERT_USED];
     float expert_weight[DS4_MAX_EXPERT_USED];
 
-    embed_token_f16(model, weights, token, plain);
+    embed_token_any(model, weights, token, plain);
     hc_from_plain_embedding(cpu_hc, plain, DS4_N_EMBD, DS4_N_HC);
     hc_pre_from_state_one(model,
                           layer->hc_attn_fn,
@@ -25513,7 +25582,7 @@ static int metal_graph_first_token_full_test(
         float *cpu_cur = xmalloc((size_t)hc_dim * sizeof(float));
         float *cpu_next = xmalloc((size_t)hc_dim * sizeof(float));
 
-        embed_token_f16(model, weights, token, plain);
+        embed_token_any(model, weights, token, plain);
         hc_from_plain_embedding(cpu_cur, plain, DS4_N_EMBD, DS4_N_HC);
         ok = ds4_gpu_begin_commands() != 0;
         if (ok) ok = ds4_gpu_embed_token_hc_tensor(metal_graph_cur_hc(&g),
@@ -26318,7 +26387,7 @@ static bool metal_graph_upload_prompt_embeddings_hc_cpu(
     float *plain = xmalloc((size_t)DS4_N_EMBD * sizeof(plain[0]));
 
     for (uint32_t t = 0; t < n_tokens; t++) {
-        embed_token_f16(model, weights, prompt->v[pos0 + t], plain);
+        embed_token_any(model, weights, prompt->v[pos0 + t], plain);
         float *dst = hc + (uint64_t)t * hc_dim;
         for (uint32_t h = 0; h < DS4_N_HC; h++) {
             memcpy(dst + (uint64_t)h * DS4_N_EMBD,
@@ -29112,6 +29181,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
         fprintf(stderr, "ds4: Metal graph raw KV cache is not allocated\n");
         return false;
     }
+    fprintf(stderr, "ds4: DBG eval streaming pos=%u token=%d logits=%d\n", pos, token, logits != NULL);
 
     const bool profile =
         glm_graph_env_present("DS4_ROCM_GRAPH_TOKEN_PROFILE",
@@ -29141,6 +29211,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
         metal_graph_stream_readahead_layer_decode(model, weights, 0);
     }
     if (ok) ok = ds4_gpu_begin_commands() != 0;
+    if (!ok) fprintf(stderr, "ds4: DBG eval begin_commands failed\n");
     if (ok) {
         ok = ds4_gpu_embed_token_hc_tensor(metal_graph_cur_hc(g),
                                            model->map,
@@ -29150,6 +29221,9 @@ static bool metal_graph_eval_token_raw_swa_streaming(
                                            (uint32_t)token,
                                            DS4_N_EMBD,
                                            DS4_N_HC) != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG eval embed_token_hc failed (type=%d dim1=%lld token=%d)\n",
+                         (int)weights->token_embd->type,
+                         (long long)weights->token_embd->dim[1], token);
     }
     if (batch_static_decode) {
         for (uint32_t il = 0; ok && il < DS4_N_LAYER; il++) {
@@ -29172,12 +29246,15 @@ static bool metal_graph_eval_token_raw_swa_streaming(
         }
         if (ok && logits) {
             ok = metal_graph_encode_output_head(g, model, weights, weights->output->dim[1]);
+            if (!ok) fprintf(stderr, "ds4: DBG streaming output head encode failed (batched)\n");
         }
         const double t_encoded = (profile || throttle) ? now_sec() : 0.0;
         if (ok) ok = ds4_gpu_end_commands() != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG batched end_commands failed\n");
         const double t_done = (profile || throttle) ? now_sec() : 0.0;
         if (ok && logits) {
             ok = ds4_gpu_tensor_read(metal_graph_logits(g), 0, logits, (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
+            if (!ok) fprintf(stderr, "ds4: DBG batched logits tensor_read failed\n");
         }
         const double t_read = (profile || throttle) ? now_sec() : 0.0;
         if (profile) {
@@ -29201,6 +29278,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
         return ok;
     }
     if (ok) ok = ds4_gpu_end_commands() != 0;
+    if (!ok) fprintf(stderr, "ds4: DBG eval embed end_commands failed\n");
 
     double encode_s = 0.0;
     double execute_s = 0.0;
@@ -29216,6 +29294,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
             metal_graph_stream_readahead_output(model, weights);
         }
         if (ok) ok = ds4_gpu_begin_commands() != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG eval layer %u begin_commands failed\n", il);
         bool encoded_layer = false;
         if (ok) {
             ok = metal_graph_encode_decode_layer(g,
@@ -29228,6 +29307,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
                                                  raw_row,
                                                  n_raw,
                                                  token);
+            if (!ok) fprintf(stderr, "ds4: DBG eval layer %u encode_decode_layer failed\n", il);
             encoded_layer = true;
         }
         if (encoded_layer) {
@@ -29238,6 +29318,7 @@ static bool metal_graph_eval_token_raw_swa_streaming(
         }
         const double tl_encoded = profile ? now_sec() : 0.0;
         if (ok) ok = ds4_gpu_end_commands() != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG eval layer %u end_commands failed\n", il);
         const double tl_done = profile ? now_sec() : 0.0;
         if (profile) {
             encode_s += tl_encoded - tl0;
@@ -29248,12 +29329,15 @@ static bool metal_graph_eval_token_raw_swa_streaming(
     if (ok && logits && !static_decode_map) ok = metal_graph_stream_map_output(model, weights);
     const double t_head0 = profile ? now_sec() : 0.0;
     if (ok && logits) ok = ds4_gpu_begin_commands() != 0;
+    if (!ok && logits) fprintf(stderr, "ds4: DBG head begin_commands failed\n");
     if (ok && logits) ok = metal_graph_encode_output_head(g, model, weights, weights->output->dim[1]);
     const double t_head_encoded = profile ? now_sec() : 0.0;
     if (ok && logits) ok = ds4_gpu_end_commands() != 0;
+    if (!ok && logits) fprintf(stderr, "ds4: DBG head end_commands failed\n");
     const double t_done = (profile || throttle) ? now_sec() : 0.0;
     if (ok && logits) {
         ok = ds4_gpu_tensor_read(metal_graph_logits(g), 0, logits, (uint64_t)DS4_N_VOCAB * sizeof(float)) != 0;
+        if (!ok) fprintf(stderr, "ds4: DBG head logits tensor_read failed\n");
     }
     const double t_read = (profile || throttle) ? now_sec() : 0.0;
 
@@ -29452,6 +29536,7 @@ static bool metal_graph_prefill_decode_streaming_range(
         const uint32_t pos = start + i;
         const bool last = i + 1u == n_tokens;
         float *token_logits = (last && logits) ? logits : NULL;
+        fprintf(stderr, "ds4: DBG prefill loop i=%u pos=%u last=%d logits=%d\n", i, pos, (int)last, token_logits != NULL);
         if (!metal_graph_eval_token_raw_swa(g,
                                             model,
                                             weights,
@@ -33622,6 +33707,9 @@ static bool metal_graph_prefill_raw_swa(
         bool                  *cancelled) {
     if (n_tokens <= 0 || n_tokens > prompt->len) return false;
     if ((uint32_t)n_tokens > g->prefill_cap) return false;
+    fprintf(stderr, "ds4: DBG prefill_raw_swa n_tokens=%d streaming=%d\n",
+            n_tokens,
+            (int)metal_graph_use_streaming_decode_prefill_range(g, weights, 0, (uint32_t)n_tokens));
     if (metal_graph_use_streaming_decode_prefill_range(g, weights, 0,
                                                        (uint32_t)n_tokens)) {
         return metal_graph_prefill_decode_streaming_range(g,

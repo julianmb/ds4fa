@@ -669,6 +669,78 @@ extern "C" int ds4_gpu_matmul_f16_tensor(ds4_gpu_tensor *out, const void *model_
     return cuda_ok(cudaGetLastError(), "matmul_f16 launch");
 }
 
+extern "C" int ds4_gpu_matmul_bf16_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, uint64_t n_tok) {
+    if (!out || !x || !model_map ||
+        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
+    uint64_t weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight_offset > model_size ||
+        !cuda_u64_mul3_checked(out_dim, in_dim, sizeof(uint16_t), &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
+    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "bf16");
+    if (!wptr) return 0;
+    const unsigned short *w = (const unsigned short *)wptr;
+    dim3 grid((unsigned)out_dim, (unsigned)n_tok, 1);
+    matmul_bf16_ordered_chunks_kernel<<<grid, 32>>>((float *)out->ptr, w, (const float *)x->ptr, in_dim, out_dim, n_tok);
+    return cuda_ok(cudaGetLastError(), "matmul_bf16 launch");
+}
+
+extern "C" int ds4_gpu_matmul_q4_k_tensor(
+        ds4_gpu_tensor *out,
+        const void *model_map,
+        uint64_t model_size,
+        uint64_t weight_offset,
+        uint64_t in_dim,
+        uint64_t out_dim,
+        const ds4_gpu_tensor *x,
+        uint64_t n_tok) {
+    if (!out || !x || !model_map ||
+        in_dim == 0u || out_dim == 0u || n_tok == 0u ||
+        in_dim > UINT32_MAX || out_dim > UINT32_MAX || n_tok > UINT32_MAX) return 0;
+    const uint64_t n_blocks = (in_dim + 255u) / 256u;
+    uint64_t row_bytes = 0, weight_bytes = 0, x_bytes = 0, out_bytes = 0;
+    if (weight_offset > model_size ||
+        !cuda_u64_mul_checked(n_blocks, 144u, &row_bytes) ||
+        !cuda_u64_mul_checked(out_dim, row_bytes, &weight_bytes) ||
+        weight_bytes > model_size - weight_offset ||
+        !cuda_u64_mul3_checked(n_tok, in_dim, sizeof(float), &x_bytes) ||
+        !cuda_u64_mul3_checked(n_tok, out_dim, sizeof(float), &out_bytes) ||
+        x->bytes < x_bytes || out->bytes < out_bytes) return 0;
+    const char *wptr = cuda_model_range_ptr(model_map, weight_offset, weight_bytes, "q4_k");
+    if (!wptr) return 0;
+    if (n_tok == 1u) {
+        const uint32_t in32 = (uint32_t)in_dim;
+        if (in32 <= 8192u && (uint64_t)in32 * sizeof(float) <= 65536u) {
+            const uint32_t rows_per_block = 32u;
+            matmul_q4_k_f32_sharedx_warp_rows_w32_kernel<<<
+                    (unsigned)((out_dim + rows_per_block - 1u) / rows_per_block),
+                    rows_per_block * 32u,
+                    (size_t)in32 * sizeof(float)>>>(
+                    (float *)out->ptr,
+                    reinterpret_cast<const unsigned char *>(wptr),
+                    (const float *)x->ptr,
+                    (uint32_t)n_blocks,
+                    out_dim,
+                    row_bytes);
+            return cuda_ok(cudaGetLastError(), "matmul_q4_k f32 sharedx launch");
+        }
+    }
+    dim3 bgrid(((unsigned)out_dim + 7u) / 8u, (unsigned)n_tok, 1);
+    matmul_q4_k_f32_batch_warp8_kernel<<<bgrid, 256>>>(
+            (float *)out->ptr,
+            reinterpret_cast<const unsigned char *>(wptr),
+            (const float *)x->ptr,
+            (uint32_t)n_blocks,
+            in_dim,
+            out_dim,
+            n_tok,
+            row_bytes);
+    return cuda_ok(cudaGetLastError(), "matmul_q4_k f32 batch warp launch");
+}
+
 extern "C" int ds4_gpu_matmul_f16_pair_tensor(
         ds4_gpu_tensor *out0,
         ds4_gpu_tensor *out1,
