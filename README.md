@@ -55,9 +55,8 @@ The original `antirez/ds4` repository provided the initial ROCm backend for Deep
 
 To run on `ds4fa` without modifying GPU kernels, the model tensors must match the engine's kernel expectations:
 
-```
-tekosML/DeepSeek-V4-Flash-0731-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf (86.72 GB)
-```
+* **Hugging Face Model Page**: [tekosML/DeepSeek-V4-Flash-0731-GGUF-GX10](https://huggingface.co/tekosML/DeepSeek-V4-Flash-0731-GGUF-GX10)
+* **File Name**: `DeepSeek-V4-Flash-0731-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-imatrix.gguf` (**86.72 GB**)
 
 | Tensor Group | GGUF Tensor Name | Quantization Type | Status |
 | :--- | :--- | :--- | :--- |
