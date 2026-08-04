@@ -11,6 +11,7 @@
 /TODO.md
 /gguf/*
 !/gguf/README.md
+/dist/
 /core
 /core.*
 /tests/test_engine_mgpu_placement
