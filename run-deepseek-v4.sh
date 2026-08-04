@@ -9,7 +9,7 @@ MODEL="${ROOT}/gguf/DeepSeek-V4-Flash-ROCMFP2-STRIX.gguf"
 if [ ! -f "$MODEL" ] && [ -f "${ROOT}/ds4flash.gguf" ]; then
     MODEL="${ROOT}/ds4flash.gguf"
 fi
-DRAFT="${ROOT}/gguf/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf"
+DRAFT="${ROOT}/gguf/draft/DeepSeek-V4-Flash-DSpark-draft-Q4RMFP4-denseF16.gguf"
 
 MODE="server"
 PORT="8000"

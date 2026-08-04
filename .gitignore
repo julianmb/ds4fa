@@ -9,7 +9,8 @@
 /ds4_test
 /ds4flash.gguf
 /TODO.md
-/gguf/
+/gguf/*
+!/gguf/README.md
 /core
 /core.*
 /tests/test_engine_mgpu_placement
