@@ -1,3 +1,15 @@
+---
+license: mit
+tags:
+  - deepseek
+  - moe
+  - amd
+  - strix-halo
+  - rocm
+  - gguf
+pipeline_tag: text-generation
+---
+
 <p align="center">
   <strong>DeepSeek V4 Flash on AMD Strix Halo</strong><br>
   <em>Tuned Strix Halo (gfx1151) fork of antirez/ds4 with ROCm 7.2.x diagnostics, SSD expert streaming, and DeepSeek-V4-Flash-0731 support</em>
