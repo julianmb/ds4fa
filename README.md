@@ -84,10 +84,10 @@ ROCmFPX only handles the weight traffic. The full 32 tok/s profile also uses:
 
 The upstream repo brought the initial DeepSeek V4 ROCm backend. This fork makes it actually run *well* on Strix Halo:
 
-### 1. Fixed the SSD Expert Streaming Slab Allocator (`ds4.c`)
+### 1. Fixed the SSD Expert Streaming Slab Allocator (`src/ds4.c`)
 Mixed-precision GGUFs have layers with different per-expert sizes (e.g. 0731's Layer 26 uses `IQ2_S` gate/up at 82 B/256 vs `IQ2_XXS` at 66 B/256). Upstream pinned the streaming cache to the *first* layer's size, which bounced Layer 26 into pageable mapped views — an MMU fault on ROCm. Now the slab is sized to the **maximum** across all 43 layers, so **0/43 layers fall off the fast path**.
 
-### 2. New GPU kernels (`rocm/`)
+### 2. New GPU kernels (`src/rocm/`)
 - **`Q4_K` token embedding** kernels (`embed_token_hc_q4_k_kernel`, `embed_tokens_hc_q4_k_kernel`)
 - **`Q4_K` dense matmul** kernels (`matmul_q4_k_f32_sharedx_warp_rows_w32_kernel`, `matmul_q4_k_f32_batch_warp8_kernel`)
 - **`BF16` dense matmul** kernel (`matmul_bf16_ordered_chunks_kernel`)
