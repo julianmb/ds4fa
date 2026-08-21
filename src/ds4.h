@@ -158,6 +158,8 @@ typedef struct {
     bool inspect_only;
     /* Multi-GPU placement uses this to price per-layer KV storage. */
     int placement_ctx_hint;
+    /* Number of independently allocated session graphs/caches to reserve. */
+    int placement_session_count_hint;
     /* Server batch mode serializes execution and can share prefill scratch. */
     bool share_session_prefill_workspace;
     bool first_token_test;
@@ -371,6 +373,8 @@ int ds4_test_sample_logits(const float *logits, uint32_t n_vocab,
                            float temperature, int top_k,
                            float top_p, float min_p, uint64_t *rng,
                            float *prob_scratch);
+int ds4_test_argmax_excluding_logits(const float *logits, uint32_t n_vocab,
+                                     int excluded_id);
 uint64_t ds4_test_mixed_native_count(void);
 #endif
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k);
