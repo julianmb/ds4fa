@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  cpu-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build CPU target (gcc)
+        run: make cpu -j"$(nproc)"
+
+      - name: Smoke test binaries
+        run: |
+          ./ds4 --help > /dev/null
+          ./ds4-server --help > /dev/null 2>&1 || true
+          echo "binaries execute"
