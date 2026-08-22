@@ -12,6 +12,10 @@ pipeline_tag: text-generation
 ---
 
 <p align="center">
+  <img src="logo.svg" alt="ds4fa" width="360">
+</p>
+
+<p align="center">
   <strong>⚡ DeepSeek V4 Flash on AMD Strix Halo</strong><br>
   <em>Up to 32 tok/s decode — a tuned gfx1151 fork of antirez/ds4 with ROCmFPX tooling, SSD expert streaming, and native DeepSeek-V4-Flash-0731 support</em>
 </p>
@@ -21,7 +25,7 @@ pipeline_tag: text-generation
   <img src="https://img.shields.io/badge/platform-AMD%20Strix%20Halo%20gfx1151-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/ROCm-7.2.x-e95420?style=flat-square" alt="ROCm">
   <img src="https://img.shields.io/badge/Ubuntu-24.04%20HWE-orange?style=flat-square" alt="Ubuntu">
-  <img src="https://img.shields.io/badge/model-DeepSeek%20V4%20Flash%200731-purple?style=flat-square" alt="Model">
+  <a href="https://huggingface.co/julianmb/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20weights-DeepSeek%20V4%20Flash%200731-purple?style=flat-square" alt="Model"></a>
 </p>
 
 <p align="center">
@@ -237,6 +241,15 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 | :--- | :--- |
 | [STRIXHALO.md](STRIXHALO.md) | ROCm install, GRUB params, TTM priority, hardware notes |
 | [FORK_NOTES.md](FORK_NOTES.md) | Audit of what was retained/rejected from upstream |
+| [docs/MODEL_CARD.md](docs/MODEL_CARD.md) | DeepSeek V4 Flash architecture synopsis (params, context, attention) |
+| [docs/QA_BEFORE_RELEASES.md](docs/QA_BEFORE_RELEASES.md) | Full upstream release test checklist |
+| [docs/AGENT.md](docs/AGENT.md) | Upstream engineering notes for the inference engine |
+| [docs/UPSTREAM_README.md](docs/UPSTREAM_README.md) | Original `antirez/ds4` README, preserved post-merge |
+
+## 🌐 Also on Hugging Face
+
+- **Code (this repo, mirrored):** [julianmb/ds4fa](https://huggingface.co/julianmb/ds4fa)
+- **Model weights:** [julianmb/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX](https://huggingface.co/julianmb/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX)
 
 ## 🤝 Acknowledgements
 
