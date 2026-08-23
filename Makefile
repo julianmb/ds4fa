@@ -63,7 +63,7 @@ DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
 METAL_LDLIBS := $(LDLIBS)
 endif
 
-.PHONY: all help clean test test-metal-session-batch test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-diag rocm-bench-quick rocm-model-fit rocm-doctor rocm-verify ci
+.PHONY: all help clean test test-metal-session-batch test-mxfp4-cuda test-cuda-session-batch test-cuda-mixed-batch dspark-acceptance dspark-verify-depth mtp-verify-depth cpu cuda cuda-spark cuda-generic cuda-regression strix-halo rocm rocm-smoke rocm-moe-iq2-q2k-test rocm-diag rocm-bench-quick rocm-model-fit rocm-doctor rocm-verify ci
 
 ifeq ($(UNAME_S),Darwin)
 .PHONY: metal-decode-schedule-bench metal-prefill-variant-bench check-mxfp4-half-lut
@@ -158,6 +158,7 @@ help:
 	@echo "  make strix-halo          Build ROCm for Strix Halo / gfx1151"
 	@echo "  make rocm                Alias for make strix-halo"
 	@echo "  make rocm-smoke          Build and run the ROCm/Strix Halo hardware smoke test"
+	@echo "  make rocm-moe-iq2-q2k-test  Run the synthetic IQ2/Q2_K routed-MoE parity test"
 	@echo "  make rocm-model-fit      Report whether DS4_TEST_MODEL fits the TTM/GTT limit"
 	@echo "  make rocm-verify         Full verification: doctor + smoke + bench + model-fit"
 	@echo "  make rocm-doctor         One-screen triage for Strix Halo setup"
@@ -198,6 +199,15 @@ tests/rocm_smoke: tests/rocm_smoke.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unava
 
 rocm-smoke: tests/rocm_smoke
 	./tests/rocm_smoke
+
+tests/test_moe_iq2_q2k_batch.o: tests/test_moe_iq2_q2k_batch.cpp tests/iq2_host_tables.inc ds4_gpu.h
+	$(HIPCC) $(ROCM_CFLAGS) -I src -c -o $@ $<
+
+tests/test_moe_iq2_q2k_batch: tests/test_moe_iq2_q2k_batch.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o
+	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+rocm-moe-iq2-q2k-test: tests/test_moe_iq2_q2k_batch
+	./tests/test_moe_iq2_q2k_batch
 
 # Print only the Strix Halo runtime profile (no model needed). Honors
 # DS4_ROCM_DIAG to also write a machine-readable summary. The smoke test calls
@@ -562,4 +572,5 @@ mxfp4-dot-test: tests/test_mxfp4_dot.c
 clean:
 	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_cpu ds4_native ds4_server_test ds4_test ds4_agent_test gguf-tools/quality-testing/score_official gguf-tools/quality-testing/score_official.o speed-bench/metal_decode_schedule_bench speed-bench/metal_prefill_variant_bench speed-bench/*.o tests/test_q4k_dot tests/test_mxfp4_dot tests/test_mxfp4_metal tests/test_mxfp4_cuda tests/test_metal_session_batch tests/test_gpu_xdev tests/test_gpu_model_cache tests/test_gpu_lookup_cache_strict tests/test_engine_mgpu_refusal tests/test_engine_mgpu_runtime tests/test_engine_correctness tests/test_sampling tests/test_cuda_session_batch tests/test_cuda_mixed_batch tests/*.o *.o 	tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o \
 	tests/rocm_smoke tests/rocm_smoke.o \
-	tests/rocm_bench_quick tests/rocm_bench_quick.o
+	tests/rocm_bench_quick tests/rocm_bench_quick.o \
+	tests/test_moe_iq2_q2k_batch
