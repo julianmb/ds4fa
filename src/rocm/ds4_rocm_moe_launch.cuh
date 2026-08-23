@@ -987,6 +987,8 @@ static int routed_moe_launch(
             ok && iq2_gate_path && n_tokens > 1u && n_expert == 6u && !write_gate_up &&
             sorted_pairs && sorted_offsets && sorted_counts && tile_experts && iq2_gate_hot_dev && use_expert_tiles &&
             (expert_in_dim % 16u) == 0u && (expert_mid_dim % 16u) == 0u &&
+            /* The gfx1151 parity test fails once an expert reaches the hot threshold. */
+            getenv("DS4_ROCM_ENABLE_IQ2_GATE_WMMA") != NULL &&
             !g_quality_mode;
         if (use_iq2_gate_wmma) {
             uint32_t h_counts[DS4_ROCM_MAX_N_EXPERT] = {0};
