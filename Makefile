@@ -183,7 +183,7 @@ cuda:
 	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent CUDA_ARCH="$(CUDA_ARCH)"
 
 strix-halo:
-	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent \
+	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_test \
 		CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_layer_pack.o" \
 		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
 		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
@@ -340,11 +340,11 @@ ds4_web.o: ds4_web.c ds4_web.h
 ds4_kvstore.o: ds4_kvstore.c ds4_kvstore.h ds4.h ds4_ssd.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-ds4_test.o: tests/ds4_test.c ds4_server.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h rax.h
-	$(CC) $(CFLAGS) -Wno-unused-function -c -o $@ $<
+ds4_test.o: tests/ds4_test.c src/ds4_server.c src/ds4.h src/ds4_ssd.h src/ds4_distributed.h src/ds4_help.h src/ds4_kvstore.h src/rax.h
+	$(CC) $(CFLAGS) -I src -Wno-unused-function -c -o $@ $<
 
-ds4_agent_test.o: tests/ds4_agent_test.c ds4_agent.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_kvstore.h ds4_web.h linenoise.h
-	$(CC) $(CFLAGS) -Wno-unused-function -c -o $@ $<
+ds4_agent_test.o: tests/ds4_agent_test.c src/ds4_agent.c src/ds4.h src/ds4_ssd.h src/ds4_distributed.h src/ds4_help.h src/ds4_kvstore.h src/ds4_web.h src/linenoise.h
+	$(CC) $(CFLAGS) -I src -Wno-unused-function -c -o $@ $<
 
 tests/cuda_long_context_smoke.o: tests/cuda_long_context_smoke.c ds4_gpu.h
 	$(CC) $(CFLAGS) -I src -c -o $@ $<
@@ -505,18 +505,10 @@ test-cuda-mixed-batch: tests/test_cuda_mixed_batch
 endif
 
 ds4_test: ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS)
-ifeq ($(UNAME_S),Darwin)
-	$(CC) $(CFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(METAL_LDLIBS)
-else
-	$(NVCC) $(NVCCFLAGS) -o $@ ds4_test.o ds4_help.o ds4_kvstore.o rax.o $(CORE_OBJS) $(CUDA_LDLIBS)
-endif
+	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
 
 ds4_agent_test: ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS)
-ifeq ($(UNAME_S),Darwin)
-	$(CC) $(CFLAGS) -o $@ ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(METAL_LDLIBS)
-else
-	$(NVCC) $(NVCCFLAGS) -o $@ ds4_agent_test.o ds4_help.o ds4_web.o ds4_kvstore.o linenoise.o $(CORE_OBJS) $(CUDA_LDLIBS)
-endif
+	$(DS4_LINK) -o $@ $^ $(DS4_LINK_LIBS)
 
 test: ds4_test ds4_agent_test ds4-eval q4k-dot-test mxfp4-dot-test \
 	tests/test_layer_pack tests/test_engine_mgpu_placement tests/test_gpu_args \

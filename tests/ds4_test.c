@@ -1,8 +1,8 @@
 #define DS4_SERVER_TEST
 #define DS4_SERVER_TEST_NO_MAIN
-#include "../ds4_server.c"
+#include "../src/ds4_server.c"
 #ifndef DS4_NO_GPU
-#include "../ds4_gpu.h"
+#include "../src/ds4_gpu.h"
 #include <math.h>
 
 bool ds4_test_dspark_cache_window_crop(void);

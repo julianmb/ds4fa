@@ -30898,7 +30898,7 @@ static bool metal_graph_streaming_decode_prefill_wide_default(
            weights->layer[0].ffn_down_exps->type == type;
 }
 
-static uint32_t metal_graph_streaming_decode_prefill_max_tokens(
+static DS4_MAYBE_UNUSED uint32_t metal_graph_streaming_decode_prefill_max_tokens(
         const ds4_gpu_graph *g,
         const ds4_weights   *weights) {
     (void)g;
@@ -30931,6 +30931,10 @@ static bool metal_graph_use_streaming_decode_prefill(
         const ds4_gpu_graph *g,
         const ds4_weights   *weights,
         uint32_t             n_tokens) {
+#ifdef DS4_ROCM_BUILD
+    (void)g; (void)weights; (void)n_tokens;
+    return false;
+#else
     const uint32_t max_tokens =
         metal_graph_streaming_decode_prefill_max_tokens(g, weights);
     return g &&
@@ -30939,6 +30943,7 @@ static bool metal_graph_use_streaming_decode_prefill(
            n_tokens != 0 &&
            max_tokens != 0 &&
            n_tokens <= max_tokens;
+#endif
 }
 
 static bool metal_graph_use_streaming_decode_prefill_range(

@@ -390,7 +390,7 @@ static int attention_decode_batch_launch(
         fprintf(stderr, DS4_GPU_LOG_PREFIX "attention score buffer too small for %u compressed rows\n", n_comp);
         return 0;
     }
-    if (!use_comp_mask && n_tokens > 1 && head_dim == 512 &&
+    if (!use_comp_mask && n_tokens >= 1 && head_dim == 512 &&
         fast_window_attention) {
         dim3 grid(n_tokens, (n_head + 7u) / 8u, 1);
         attention_decode_mixed_heads8_online_kernel<<<grid, 256>>>((float *)heads->ptr,
@@ -541,7 +541,7 @@ extern "C" int ds4_gpu_attention_indexed_mixed_batch_heads_tensor(
         if (!cuda_ok(cudaGetLastError(), "indexed attention topk sort launch")) return 0;
         topk_ptr = sorted;
     }
-    if (n_tokens > 1 &&
+    if (n_tokens >= 1 &&
         head_dim == 512 &&
         top_k <= DS4_ROCM_ATTENTION_INDEXED_TOPK_CAP) {
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)

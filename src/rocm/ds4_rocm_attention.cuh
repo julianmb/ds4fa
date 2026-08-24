@@ -792,10 +792,16 @@ __global__ static void attention_decode_mixed_kernel(
                 if (kvrow) {
                     float dot = 0.0f;
                     for (uint32_t d = qlane; d < head_dim; d += 8u) dot += qh[d] * kvrow[d];
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+                    for (uint32_t off = 4u; off > 0u; off >>= 1u) {
+                        dot += __shfl_down(dot, off, 8);
+                    }
+#else
                     const uint32_t mask = 0xffu << (threadIdx.x & 24u);
                     for (uint32_t off = 4u; off > 0u; off >>= 1u) {
                         dot += __shfl_down_sync(static_cast<MASK_T>(mask), dot, off, 8);
                     }
+#endif
                     s = dot * scale + add;
                 }
                 if (qlane == 0) scores[row] = s;
@@ -1037,10 +1043,16 @@ __global__ static void attention_indexed_mixed_kernel(
                     : comp_kv + (uint64_t)comp_rows[row - raw_count] * head_dim;
                 float dot = 0.0f;
                 for (uint32_t d = qlane; d < head_dim; d += 8u) dot += qh[d] * kvrow[d];
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+                for (uint32_t off = 4u; off > 0u; off >>= 1u) {
+                    dot += __shfl_down(dot, off, 8);
+                }
+#else
                 const uint32_t mask = 0xffu << (threadIdx.x & 24u);
                 for (uint32_t off = 4u; off > 0u; off >>= 1u) {
                     dot += __shfl_down_sync(static_cast<MASK_T>(mask), dot, off, 8);
                 }
+#endif
                 if (qlane == 0) scores[row] = dot * scale;
             }
         }
@@ -1221,7 +1233,11 @@ __global__ static void attention_indexed_mixed_heads8_online_kernel(
                               dot4_f32(q2, k2) +
                               dot4_f32(q3, k3);
                 score = warp_sum_f32(score) * scale;
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+                score = __shfl(score, 0, 32);
+#else
                 score = __shfl_sync(FULL_WARP_MASK, score, 0);
+#endif
 
                 const float new_m = fmaxf(max_s, score);
                 const float old_scale = expf(max_s - new_m);
@@ -1332,7 +1348,11 @@ __global__ static void attention_static_mixed_heads8_online_kernel(
         const float *score_row = scores + warp * 768u;
         for (uint32_t i = lane; i < n_score; i += 32u) max_s = fmaxf(max_s, score_row[i]);
         max_s = warp_max_f32(max_s);
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+        max_s = __shfl(max_s, 0, 32);
+#else
         max_s = __shfl_sync(FULL_WARP_MASK, max_s, 0);
+#endif
     }
     float den = 0.0f;
     if (valid_head) {
@@ -1344,7 +1364,11 @@ __global__ static void attention_static_mixed_heads8_online_kernel(
         }
         den = warp_sum_f32(den);
         den += expf(sinks[head] - max_s);
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+        den = __shfl(den, 0, 32);
+#else
         den = __shfl_sync(FULL_WARP_MASK, den, 0);
+#endif
     }
 
     float4 o0 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1497,7 +1521,11 @@ __global__ static void attention_decode_mixed_heads8_online_kernel(
                               dot4_f32(q2, k2) +
                               dot4_f32(q3, k3);
                 score = warp_sum_f32(score) * scale;
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+                score = __shfl(score, 0, 32);
+#else
                 score = __shfl_sync(FULL_WARP_MASK, score, 0);
+#endif
 
                 max_s = fmaxf(max_s, score);
             }
@@ -1533,7 +1561,11 @@ __global__ static void attention_decode_mixed_heads8_online_kernel(
                               dot4_f32(q2, k2) +
                               dot4_f32(q3, k3);
                 score = warp_sum_f32(score) * scale;
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+                score = __shfl(score, 0, 32);
+#else
                 score = __shfl_sync(FULL_WARP_MASK, score, 0);
+#endif
 
                 const float row_scale = expf(score - max_s);
                 sum_s += row_scale;

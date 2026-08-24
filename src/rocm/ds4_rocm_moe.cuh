@@ -463,19 +463,31 @@ __device__ static void dev_dot_q2_K_q8_K_block8(
 }
 
 __device__ static float half_warp_sum_f32(float v, uint32_t lane16) {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    for (int offset = 8; offset > 0; offset >>= 1) {
+        v += __shfl_down(v, offset, 16);
+    }
+#else
     uint32_t mask = 0xffffu << (threadIdx.x & 16u);
     for (int offset = 8; offset > 0; offset >>= 1) {
         v += __shfl_down_sync(static_cast<MASK_T>(mask), v, offset, 16);
     }
+#endif
     (void)lane16;
     return v;
 }
 
 __device__ static float quarter_warp_sum_f32(float v, uint32_t lane8) {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    for (int offset = 4; offset > 0; offset >>= 1) {
+        v += __shfl_down(v, offset, 8);
+    }
+#else
     uint32_t mask = 0xffu << (threadIdx.x & 24u);
     for (int offset = 4; offset > 0; offset >>= 1) {
         v += __shfl_down_sync(static_cast<MASK_T>(mask), v, offset, 8);
     }
+#endif
     (void)lane8;
     return v;
 }

@@ -55,10 +55,9 @@ if [ ! -f "$MODEL" ]; then
     exit 1
 fi
 
-# Safety Step 1: Enforce 115 GB virtual memory cap to protect kernel/amdgpu driver
-ulimit -v 123480320 2>/dev/null || true
-
-# Safety Step 2: Check model fit before loading
+# Safety: physical-fit is verified by tests/rocm_model_fit and TTM limits
+# (no artificial ulimit -v: Strix Halo has 128 GB unified memory, and
+# cache sizes below are chosen to stay well under the 120 GiB TTM ceiling).
 echo "Checking model fit for $MODEL..."
 if ! "${ROOT}/tests/rocm_model_fit" "$MODEL" >/dev/null 2>&1; then
     echo "Warning: Model size exceeds safe TTM/GTT limits!" >&2
@@ -76,7 +75,7 @@ export DFLASH_DS4_SPEC=1
 export DFLASH_DS4_FUSED_VERIFY=1
 export DFLASH_DS4_SPEC_Q=4
 export LUCE_MMVQ_MAX_NCOLS=4
-export DS4_ROCM_STREAM_MODEL_CACHE_GB=48
+export DS4_ROCM_STREAM_MODEL_CACHE_GB=32
 
 if [ -f "$DRAFT" ]; then
     export DFLASH_DS4_DRAFT="$DRAFT"
@@ -90,11 +89,11 @@ if [ "$MODE" = "server" ]; then
         -c "$CTX" \
         --port "$PORT" \
         --ssd-streaming \
-        --ssd-streaming-cache-experts 48GB
+        --ssd-streaming-cache-experts 32GB
 else
     echo "Starting ds4 interactive CLI..."
     exec "${ROOT}/ds4" -m "$MODEL" \
         -c "$CTX" \
         --ssd-streaming \
-        --ssd-streaming-cache-experts 48GB
+        --ssd-streaming-cache-experts 32GB
 fi

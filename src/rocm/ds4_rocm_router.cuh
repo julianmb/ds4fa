@@ -85,9 +85,15 @@ __global__ static void router_select_warp_topk_kernel(
         }
         #pragma unroll
         for (uint32_t mask = 16u; mask > 0u; mask >>= 1u) {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+            const float other_score = __shfl_xor(best_score, mask, 32);
+            const float other_prob = __shfl_xor(best_prob, mask, 32);
+            const uint32_t other_idx = __shfl_xor(best_idx, mask, 32);
+#else
             const float other_score = __shfl_xor_sync(FULL_WARP_MASK, best_score, mask);
             const float other_prob = __shfl_xor_sync(FULL_WARP_MASK, best_prob, mask);
             const uint32_t other_idx = __shfl_xor_sync(FULL_WARP_MASK, best_idx, mask);
+#endif
             if (router_score_better(other_score, other_idx, best_score, best_idx)) {
                 best_score = other_score;
                 best_prob = other_prob;
