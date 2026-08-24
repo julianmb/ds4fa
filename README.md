@@ -102,6 +102,11 @@ In-place GGUF converter with bit-exact `MXFP4` dequantization and correct elemen
 ### 4. ROCm 7.2.x diagnostics & TTM auto-sizing
 `make rocm-diag`, `make rocm-doctor`, `make rocm-smoke`, `make rocm-bench-quick`, and `DS4_ROCM_TTM_AUTORAISE=1` — detect bad configs and fix them automatically.
 
+### 5. gfx1151 F16 Embedding Dispatch & Wave32 Warp Shuffles (`src/rocm/`)
+- **F16 Token Embedding Launch:** Restored direct F16 embedding kernels in `src/rocm/ds4_rocm_embedding_launch.cuh`, eliminating a bug where F16 float tables were falsely decoded as Q4_K packed nibbles on full models.
+- **Wave32 Shuffle Intrinsics:** Replaced 64-bit masked CUDA-emulated shuffles with native HIP intrinsics (`__shfl`, `__shfl_down`, `__shfl_xor`) across attention, router, and MoE kernels for exact reductions and broadcasts.
+- **128 GB APU Memory Safeguards:** Removed artificial `ulimit -v` virtual-address caps in `run-deepseek-v4.sh` and calibrated physical cache defaults (`32GB`), ensuring full-model execution stays safely within 55–68 GB of physical unified RAM.
+
 ---
 
 ## 📦 Two Ways to Run DeepSeek-V4-Flash-0731
@@ -185,7 +190,7 @@ ln -sf gguf/deepseek-v4-flash-0731/DeepSeek-V4-Flash-0731-IQ2XXS-STRIX.gguf ds4f
 **Interactive CLI:**
 
 ```sh
-DS4_ROCM_STREAM_MODEL_CACHE_GB=48 ./ds4 -m ds4flash.gguf -c 512 \
+DS4_ROCM_STREAM_MODEL_CACHE_GB=32 ./ds4 -m ds4flash.gguf -c 512 \
   --ssd-streaming --ssd-streaming-cache-experts 32GB \
   -p "What is the capital of France?" --think --tokens 60
 ```
@@ -193,7 +198,7 @@ DS4_ROCM_STREAM_MODEL_CACHE_GB=48 ./ds4 -m ds4flash.gguf -c 512 \
 **OpenAI-compatible server:**
 
 ```sh
-DS4_ROCM_STREAM_MODEL_CACHE_GB=48 ./ds4-server -m ds4flash.gguf -c 8192 \
+DS4_ROCM_STREAM_MODEL_CACHE_GB=32 ./ds4-server -m ds4flash.gguf -c 8192 \
   --port 8000 --ssd-streaming --ssd-streaming-cache-experts 32GB
 ```
 
@@ -239,6 +244,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 
 | Document | Description |
 | :--- | :--- |
+| [docs/STRIX_HALO_TUNING_AND_FIXES.md](docs/STRIX_HALO_TUNING_AND_FIXES.md) | Technical architecture, kernel fixes, and 128 GB APU tuning guide |
 | [STRIXHALO.md](STRIXHALO.md) | ROCm install, GRUB params, TTM priority, hardware notes |
 | [FORK_NOTES.md](FORK_NOTES.md) | Audit of what was retained/rejected from upstream |
 | [docs/MODEL_CARD.md](docs/MODEL_CARD.md) | DeepSeek V4 Flash architecture synopsis (params, context, attention) |
