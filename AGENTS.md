@@ -25,4 +25,4 @@ pushed. Key resolution decisions:
 - Engine source lives under `src/` (moved there by commit 0f80087).
 - Upstream of the engine: `~/source/ds4-upstream` (antirez/ds4 clone).
 - Weights for this model live in the workshop:
-  `~/source/strix-halo-rocmfpx-hub/models/deepseek-v4/`.
+  `~/source/halofpx-research/models/deepseek-v4/`.
