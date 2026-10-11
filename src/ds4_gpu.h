@@ -2,6 +2,7 @@
 #define DS4_GPU_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -622,6 +623,11 @@ int ds4_gpu_matmul_q8_0_rows_scalar_tensor(
         uint64_t                out_dim,
         const ds4_gpu_tensor *x,
         uint64_t                n_tok);
+
+int ds4_gpu_matmul_rocmfp4_fast_tensor(
+        ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
+        uint64_t weight_offset, uint64_t in_dim, uint64_t out_dim,
+        const ds4_gpu_tensor *x, uint64_t n_tok);
 
 int ds4_gpu_matmul_q4_k_tensor(
         ds4_gpu_tensor       *out,

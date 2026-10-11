@@ -294,6 +294,11 @@ extern "C" int ds4_gpu_matmul_quant_tensor(
                                          weight_offset, in_dim, out_dim, x,
                                          n_tok);
     }
+    if (weight_type == 101u) { /* Q4_0_ROCMFP4_FAST */
+        return ds4_gpu_matmul_rocmfp4_fast_tensor(
+                out, model_map, model_size, weight_offset, in_dim, out_dim,
+                x, n_tok);
+    }
     if (weight_type == 12u) {  /* DS4_TENSOR_Q4_K */
         return ds4_gpu_matmul_q4_k_tensor(out, model_map, model_size,
                                           weight_offset, in_dim, out_dim, x,

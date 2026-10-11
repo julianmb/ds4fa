@@ -374,6 +374,14 @@ __device__ static float model_ape_value_dev(const void *base, uint64_t offset, u
         const int8_t q = ((const int8_t *)(blk + 2u))[col & 31u];
         return d * (float)q;
     }
+    if (type == 101u) {
+        const uint64_t row_bytes = ((uint64_t)width + 31u) / 32u * 17u;
+        const unsigned char *blk = (const unsigned char *)p + (uint64_t)row * row_bytes + (uint64_t)(col >> 5) * 17u;
+        const uint32_t lane = col & 31u;
+        const uint8_t packed = blk[lane & 15u];
+        const uint8_t code = lane < 16u ? (packed & 15u) : (packed >> 4u);
+        return rocmfp4_fast_scale_device(blk[16]) * (float)rocmfp4_fast_code_device(code);
+    }
     return ((const float *)p)[(uint64_t)row * width + col];
 }
 

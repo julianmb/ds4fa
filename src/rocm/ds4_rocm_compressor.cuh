@@ -175,11 +175,12 @@ static uint64_t cuda_tensor_2d_bytes(uint32_t type, uint64_t width, uint64_t row
     if (type == 0u) return width * rows * sizeof(float);
     if (type == 1u) return width * rows * sizeof(uint16_t);
     if (type == 8u) return rows * (((width + 31u) / 32u) * 34u);
+    if (type == 101u) return rows * (((width + 31u) / 32u) * 17u);
     return 0;
 }
 
 static int cuda_ape_type_supported(uint32_t type) {
-    return type == 0u || type == 1u || type == 8u;
+    return type == 0u || type == 1u || type == 8u || type == 101u;
 }
 
 static int cuda_compressor_shape_supported(uint32_t head_dim, uint32_t ratio) {

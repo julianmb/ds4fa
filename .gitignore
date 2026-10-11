@@ -48,6 +48,7 @@ misc/RESPONSE_API.md
 /tests/rocm_smoke.o
 /tests/rocm_bench_quick.o
 /tests/rocm_model_fit.o
+/tests/test_rocm_fpx
 /tests/test_moe_iq2_q2k_batch
 /tests/test_moe_iq2_q2k
 /x_article.md

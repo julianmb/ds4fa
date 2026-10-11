@@ -265,6 +265,57 @@ __global__ static void matmul_bf16_ordered_chunks_kernel(
     }
 }
 
+__device__ static float rocmfp4_fast_scale_device(uint8_t e) {
+    if (e > 0x7eu) return 0.0f;
+    const uint32_t exp = (e >> 3u) & 0x0fu;
+    const uint32_t man = e & 7u;
+    if (exp == 0u) return (float)man * (1.0f / 1024.0f);
+    const uint32_t bits = ((exp + 119u) << 23u) | (man << 20u);
+    return __uint_as_float(bits);
+}
+
+__device__ static int rocmfp4_fast_code_device(uint8_t q) {
+    q &= 0x0fu;
+    const int mag3 = q & 7;
+    const int mag = mag3 <= 4 ? mag3 : 2 * mag3 - 4;
+    return (q & 8u) ? -mag : mag;
+}
+
+__global__ static void matmul_rocmfp4_fast_f32_kernel(
+        float *out, const unsigned char *w, const float *x,
+        uint32_t n_blocks, uint64_t in_dim, uint64_t out_dim,
+        uint64_t n_tok, uint64_t row_bytes) {
+    const uint32_t tid = threadIdx.x;
+    const uint32_t lane = tid & 31u;
+    const uint32_t warp = tid >> 5u;
+    const uint64_t row = (uint64_t)blockIdx.x * (blockDim.x / 32u) + warp;
+    const uint64_t tok = (uint64_t)blockIdx.y;
+    if (row >= out_dim || tok >= n_tok) return;
+
+    const unsigned char *wr = w + row * row_bytes;
+    const float *xr = x + tok * in_dim;
+    float acc = 0.0f;
+    /* Four lanes cover one packed block, eight blocks per wave. This
+     * amortizes each scale/unpack over eight values and issues reads across
+     * adjacent blocks rather than one 16-byte payload per wave. */
+    for (uint32_t base = 0; base < n_blocks; base += 8u) {
+        const uint32_t b = base + lane / 4u;
+        if (b >= n_blocks) continue;
+        const unsigned char *blk = wr + (uint64_t)b * 17u;
+        const uint32_t j0 = (lane & 3u) * 4u;
+        const float scale = rocmfp4_fast_scale_device(blk[16]);
+        #pragma unroll
+        for (uint32_t j = 0; j < 4u; j++) {
+            const uint8_t packed = blk[j0 + j];
+            const uint64_t i = (uint64_t)b * 32u + j0 + j;
+            acc += scale * (float)rocmfp4_fast_code_device(packed & 15u) * xr[i];
+            acc += scale * (float)rocmfp4_fast_code_device(packed >> 4u) * xr[i + 16u];
+        }
+    }
+    acc = warp_sum_f32(acc);
+    if (lane == 0u) out[tok * out_dim + row] = acc;
+}
+
 /* Q4_K blocks are 144 bytes: f16 d, f16 dmin, 12 scale bytes, 128 q4 bytes.
  * Per 32-value group j (0..7): sc/m from q4_k_get_scale_min; qs byte offset
  * (j>>1)*32 with nibble shift (j&1)*4; value = d*sc*q - dmin*m. */

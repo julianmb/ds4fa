@@ -54,9 +54,10 @@ MMQ_OBJS := cuda/mmq/ds4_ggml_stubs.o cuda/mmq/ds4_mmq.o cuda/mmq/ds4_mmq_d2r.o 
 CORE_OBJS = ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_cuda.o ds4_layer_pack.o $(MMQ_OBJS)
 CPU_CORE_OBJS = ds4_cpu.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_layer_pack.o
 CUDA_LDLIBS ?= -lm -Xcompiler -pthread -L$(CUDA_HOME)/targets/sbsa-linux/lib -L$(CUDA_HOME)/lib64 -lcudart -lcublas
-HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo /opt/rocm/bin/hipcc)
+ROCM_PATH ?= /opt/rocm
+HIPCC ?= $(shell command -v hipcc 2>/dev/null || echo $(ROCM_PATH)/bin/hipcc)
 ROCM_ARCH ?= gfx1151
-ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -DDFLASH_WAVE_SIZE=32 -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH)
+ROCM_CFLAGS ?= -O3 -ffast-math -g -fno-finite-math-only -pthread -D__HIP_PLATFORM_AMD__ -DDFLASH_WAVE_SIZE=32 -Wno-unused-command-line-argument --offload-arch=$(ROCM_ARCH) -isystem $(ROCM_PATH)/include -isystem $(ROCM_PATH)/include/hip
 ROCM_LDLIBS ?= -lm -pthread -lhipblas -lhipblaslt
 DS4_LINK ?= $(NVCC) $(NVCCFLAGS)
 DS4_LINK_LIBS ?= $(CUDA_LDLIBS)
@@ -184,6 +185,8 @@ cuda:
 
 strix-halo:
 	$(MAKE) -B ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4_test \
+		HIPCC="$(HIPCC)" \
+		ROCM_CFLAGS="$(ROCM_CFLAGS)" \
 		CORE_OBJS="ds4.o ds4_distributed.o ds4_tp.o ds4_ssd.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o ds4_layer_pack.o" \
 		CFLAGS="$(CFLAGS) -DDS4_ROCM_BUILD" \
 		DS4_LINK="$(HIPCC) $(ROCM_CFLAGS)" \
@@ -199,6 +202,16 @@ tests/rocm_smoke: tests/rocm_smoke.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unava
 
 rocm-smoke: tests/rocm_smoke
 	./tests/rocm_smoke
+
+tests/test_rocm_fpx.o: tests/test_rocm_fpx.c ds4_gpu.h
+	$(CC) $(CFLAGS) -I src -c -o $@ $<
+
+tests/test_rocm_fpx: tests/test_rocm_fpx.o ds4_rocm.o ds4_rocm_compat.o ds4_rocm_unavailable.o
+	$(HIPCC) $(ROCM_CFLAGS) -o $@ $^ $(ROCM_LDLIBS)
+
+.PHONY: rocm-fpx-test
+rocm-fpx-test: tests/test_rocm_fpx
+	./tests/test_rocm_fpx
 
 tests/test_moe_iq2_q2k_batch.o: tests/test_moe_iq2_q2k_batch.cpp tests/iq2_host_tables.inc ds4_gpu.h
 	$(HIPCC) $(ROCM_CFLAGS) -I src -c -o $@ $<

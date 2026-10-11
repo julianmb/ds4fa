@@ -1,3 +1,4 @@
+#include "ds4_rocm_fpx_moe.cuh"
 static int routed_moe_u64_add_checked(uint64_t a, uint64_t b, uint64_t *out) {
     if (!out || a > UINT64_MAX - b) return 0;
     *out = a + b;
@@ -443,6 +444,7 @@ typedef struct {
     int iq2_path;
     int iq2_iq2_path;
     int q2k_path;
+    int rocmfpx_23_path;
     uint64_t gate_bytes;
     uint64_t down_bytes;
 } routed_moe_launch_plan;
@@ -493,8 +495,9 @@ static int routed_moe_build_plan(
     plan->iq2_path = (gate_type == 16u && down_type == 10u);
     plan->iq2_iq2_path = (gate_type == 16u && down_type == 16u);
     plan->q2k_path = (gate_type == 10u && down_type == 10u);
+    plan->rocmfpx_23_path = (gate_type == 107u && down_type == 104u);
     if (!plan->q4k_path && !plan->iq2_path &&
-        !plan->iq2_iq2_path && !plan->q2k_path) return 0;
+        !plan->iq2_iq2_path && !plan->q2k_path && !plan->rocmfpx_23_path) return 0;
     if (!cuda_u64_mul_checked(n_total_expert, gate_expert_bytes, &plan->gate_bytes) ||
         !cuda_u64_mul_checked(n_total_expert, down_expert_bytes, &plan->down_bytes) ||
         !cuda_model_range_fits(model_size, gate_offset, plan->gate_bytes) ||
@@ -559,6 +562,7 @@ static int routed_moe_launch(
     const int iq2_iq2_path = plan.iq2_iq2_path;
     const int iq2_gate_path = iq2_path || iq2_iq2_path;
     const int q2k_path = plan.q2k_path;
+    const int rocmfpx_23_path = plan.rocmfpx_23_path;
     const uint64_t gate_bytes = plan.gate_bytes;
     const uint64_t down_bytes = plan.down_bytes;
     uint64_t pair_count64 = 0;
@@ -636,7 +640,7 @@ static int routed_moe_launch(
         !full_table_cached &&
         !batch_stream_split_selected &&
         n_tokens > 1u &&
-        (iq2_gate_path || q2k_path) &&
+        (iq2_gate_path || q2k_path || rocmfpx_23_path) &&
         n_expert <= DS4_ROCM_N_EXPERT_USED &&
         cuda_stream_batch_selected_prepare(model_map,
                                            model_size,
@@ -658,7 +662,7 @@ static int routed_moe_launch(
     const int split_selected =
         !stream_full_layer &&
         n_tokens == 1u &&
-        getenv("DS4_ROCM_DISABLE_STREAMING_SPLIT_SELECTED") == NULL &&
+        getenv("DS4_ROCM_DISABLE_STREAMING_SPLIT_SELECTED") == NULL && !rocmfpx_23_path &&
         cuda_stream_selected_apply_split(model_map,
                                          layer_index,
                                          n_total_expert,
@@ -725,6 +729,33 @@ static int routed_moe_launch(
         return 0;
     }
     if (compact_selected && !cuda_stream_selected_wait_upload_ready()) return 0;
+
+    if (rocmfpx_23_path) {
+        const int ptr_mode = (batch_stream_selected || batch_stream_split_selected);
+        if (ptr_mode && (!gate_slot_ptrs || !up_slot_ptrs || !down_slot_ptrs)) return 0;
+        if (!ptr_mode && (!gate_w || !up_w || !down_w)) return 0;
+        const dim3 gu_grid((expert_mid_dim + 7u) / 8u, pair_count, 1u);
+        moe_gate_up_mid_rocmfpx23_kernel<<<gu_grid, 256>>>(
+                (float *)gate->ptr, (float *)up->ptr, (float *)mid->ptr,
+                ptr_mode ? NULL : gate_w, ptr_mode ? NULL : up_w,
+                ptr_mode ? gate_slot_ptrs : NULL, ptr_mode ? up_slot_ptrs : NULL,
+                (const float *)x->ptr, (const int32_t *)selected_exec->ptr,
+                (const float *)weights->ptr, gate_expert_bytes, gate_row_bytes,
+                expert_in_dim, expert_mid_dim, n_expert, clamp);
+        if (!cuda_ok(cudaGetLastError(), "routed_moe ROCmFP2 gate/up launch")) return 0;
+        const dim3 d_grid((out_dim + 7u) / 8u, n_tokens, 1u);
+        moe_down_sum_rocmfpx3_kernel<<<d_grid, 256>>>(
+                (float *)out->ptr, ptr_mode ? NULL : down_w,
+                ptr_mode ? down_slot_ptrs : NULL,
+                (const float *)mid->ptr, (const int32_t *)selected_exec->ptr,
+                down_expert_bytes, down_row_bytes, expert_mid_dim, out_dim,
+                n_expert);
+        if (!cuda_ok(cudaGetLastError(), "routed_moe ROCmFP3 down launch")) return 0;
+        if (compact_selected && !cuda_stream_selected_mark_inflight()) return 0;
+        if ((batch_stream_selected || batch_stream_split_selected) &&
+            !cuda_stream_batch_selected_mark_inflight()) return 0;
+        return 1;
+    }
 
     int ok = 1;
     const uint32_t xq_blocks = expert_in_dim / CUDA_QK_K;

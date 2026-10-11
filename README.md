@@ -235,7 +235,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 | `raw KV batch store failed` | Set `DS4_ROCM_STREAM_MODEL_CACHE_GB=48` and pass `--ssd-streaming` |
 | `pageable-memory access disabled` | `sudo amd-ttm --set-pages 8126464` or `DS4_ROCM_TTM_AUTORAISE=1` |
 | Garbage output | Use `--think` (or `temperature: 0.6`) so DeepSeek reasoning format is respected |
-| `missing gfx1151` | Build with `make strix-halo`; ensure ROCm 7.2.x |
+| `missing gfx1151` | Build with `make strix-halo`; use a ROCm release with gfx1151 support (10.1 tested here) |
 | rocWMMA header errors | Install the matching `rocwmma` tree (step 2) |
 
 ---
@@ -246,6 +246,7 @@ curl -X POST http://127.0.0.1:8000/v1/chat/completions \
 | :--- | :--- |
 | [docs/STRIX_HALO_TUNING_AND_FIXES.md](docs/STRIX_HALO_TUNING_AND_FIXES.md) | Technical architecture, kernel fixes, and 128 GB APU tuning guide |
 | [STRIXHALO.md](STRIXHALO.md) | ROCm install, GRUB params, TTM priority, hardware notes |
+| [ROUTE_A_ROCM_10_1.md](ROUTE_A_ROCM_10_1.md) | Ubuntu 26.04.1 / ROCm 10.1 build, model-format changes, validation, and limits |
 | [FORK_NOTES.md](FORK_NOTES.md) | Audit of what was retained/rejected from upstream |
 | [docs/MODEL_CARD.md](docs/MODEL_CARD.md) | DeepSeek V4 Flash architecture synopsis (params, context, attention) |
 | [docs/QA_BEFORE_RELEASES.md](docs/QA_BEFORE_RELEASES.md) | Full upstream release test checklist |
